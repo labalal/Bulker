@@ -1,0 +1,28 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+# secrets / personal data -- never share these
+cookies.txt
+.env
+
+# runtime state -- regenerated on first run
+archive.txt
+queue_store.json
+app.log
+temp_workspace/
+Songs_archive/
+downloads/
+
+# tooling
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/

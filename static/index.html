@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Downloader</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: system-ui, -apple-system, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 16px; background: #f4f4f5; color: #1a1a1a; }
+        h2 { font-size: 18px; margin: 16px 0 12px; }
+        h3 { font-size: 14px; margin: 0 0 10px; color: #333; }
+
+        .tabs { display: flex; gap: 4px; margin-bottom: 16px; background: #e9e9ec; border-radius: 8px; padding: 4px; }
+        .tab-btn { flex: 1; padding: 8px 4px; border: none; background: transparent; border-radius: 6px; font-size: 13px; font-weight: 600; color: #666; cursor: pointer; }
+        .tab-btn.active { background: white; color: #111; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
+
+        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.06); margin-bottom: 16px; }
+        textarea { width: 100%; height: 70px; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; resize: vertical; box-sizing: border-box; font-family: inherit; }
+        input[type=text] { padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; font-family: inherit; }
+        button { padding: 9px 16px; background: #000; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 13px; }
+        button:hover { background: #333; }
+        button:disabled { opacity: 0.4; cursor: default; }
+        .btn-secondary { background: #eee; color: #333; }
+        .btn-secondary:hover { background: #ddd; }
+
+        .row { display: flex; gap: 8px; }
+        .row-end { justify-content: flex-end; margin-top: 8px; }
+
+        .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 8px; }
+        .toolbar-right { display: flex; align-items: center; gap: 12px; }
+        .muted { color: #999; font-weight: normal; font-size: 12px; }
+
+        .tag { font-size: 10px; padding: 2px 6px; border-radius: 10px; background: #eef4ff; color: #0066cc; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; margin-right: 6px; white-space: nowrap; }
+
+        #queueList, #pipelineList { max-height: 420px; overflow-y: auto; }
+        .queue-item { padding: 12px 4px; border-bottom: 1px solid #eee; display: flex; flex-direction: column; gap: 6px; cursor: grab; background: white; }
+        .queue-item:last-child { border-bottom: none; }
+        .queue-item.dragging { opacity: 0.4; }
+        .queue-item.drag-over { border-top: 2px solid #0066cc; }
+
+        .title-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 14px; }
+        .drag-handle { color: #ccc; font-size: 14px; flex-shrink: 0; user-select: none; }
+        .title-text { font-weight: 500; color: #111; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .right-group { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+        .status-text { font-size: 12px; color: #666; white-space: nowrap; }
+
+        .item-action { padding: 2px 8px; background: transparent; color: #999; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; font-weight: normal; }
+        .item-action:hover { background: #fdecea; color: #d32f2f; border-color: #f5c6cb; }
+        .item-action.retry:hover { background: #eaf3ff; color: #0066cc; border-color: #b6d7ff; }
+
+        .progress-bg { width: 100%; height: 6px; background: #e0e0e0; border-radius: 4px; overflow: hidden; margin-top: 2px; }
+        .progress-fill { height: 100%; background: #0066cc; border-radius: 4px; transition: width 0.3s ease; }
+
+        .status-Completed { color: #2e7d32; font-weight: bold; }
+        .status-Error { color: #d32f2f; }
+        .status-Cancelled, .status-Cancelling { color: #999; }
+
+        .step-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+        .step-badge { padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; }
+        .step-pending { background: #eee; color: #999; }
+        .step-active { background: #e3f2fd; color: #0066cc; }
+        .step-done { background: #e8f5e9; color: #2e7d32; }
+        .step-failed { background: #fdecea; color: #d32f2f; }
+
+        .logs-toggle { background: none; color: #555; font-weight: normal; padding: 0; text-decoration: underline; font-size: 13px; }
+        .logs-toggle:hover { background: none; color: #000; }
+        #logsPanel { display: none; margin-top: 12px; }
+        #logsOutput { background: #111; color: #ddd; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; padding: 12px; border-radius: 6px; max-height: 260px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+        .logs-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .logs-header button { padding: 4px 10px; font-size: 12px; font-weight: normal; }
+
+        .search-result { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid #eee; font-size: 13px; }
+        .search-result:last-child { border-bottom: none; }
+        .search-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+        .search-meta { color: #888; font-size: 12px; white-space: nowrap; }
+
+        .history-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid #eee; font-size: 13px; }
+        .history-item:last-child { border-bottom: none; }
+        .history-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .history-meta { color: #999; font-size: 11px; white-space: nowrap; }
+
+        .settings-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #eee; gap: 16px; }
+        .settings-row:last-child { border-bottom: none; }
+        .settings-label { font-size: 13px; color: #333; }
+        .settings-label .muted { display: block; font-size: 11px; margin-top: 2px; }
+        .settings-value { font-family: ui-monospace, monospace; font-size: 12px; color: #555; }
+        input[type=range] { width: 120px; }
+    </style>
+</head>
+<body>
+    <h2>🎵 Music Downloader — Command Center</h2>
+
+    <div class="tabs">
+        <button class="tab-btn active" data-tab="queue" onclick="switchTab('queue')">Queue</button>
+        <button class="tab-btn" data-tab="pipeline" onclick="switchTab('pipeline')">Pipeline &amp; Logs</button>
+        <button class="tab-btn" data-tab="archive" onclick="switchTab('archive')">Archive</button>
+        <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">Settings</button>
+    </div>
+
+    <!-- QUEUE TAB -->
+    <div class="tab-panel active" id="tab-queue">
+        <div class="card">
+            <h3>Add to queue</h3>
+            <textarea id="urlInput" placeholder="Paste a video URL, playlist link, or multiple URLs (one per line)..."></textarea>
+            <div class="row row-end">
+                <button onclick="addUrls()">Add to Queue</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>Search &amp; add</h3>
+            <div class="row">
+                <input type="text" id="searchInput" placeholder="Search a song or artist..." style="flex:1;">
+                <button onclick="searchSongs()">Search</button>
+            </div>
+            <div id="searchResults" style="margin-top: 8px;"></div>
+        </div>
+
+        <div class="card">
+            <div class="toolbar">
+                <h3 style="margin:0;">Queue <span class="muted">(drag to reorder)</span></h3>
+                <button class="btn-secondary" style="font-size:12px; padding:4px 10px;" onclick="clearFinished()">Clear finished</button>
+            </div>
+            <div id="queueList"></div>
+        </div>
+    </div>
+
+    <!-- PIPELINE TAB -->
+    <div class="tab-panel" id="tab-pipeline">
+        <div class="card">
+            <h3>Live pipeline</h3>
+            <div id="pipelineList"></div>
+        </div>
+        <div class="card">
+            <button class="logs-toggle" onclick="toggleLogs()" id="logsToggleBtn">Show raw logs</button>
+            <div id="logsPanel">
+                <div class="logs-header">
+                    <span style="font-size: 13px; color: #555;">Last 200 log lines (yt-dlp, ffmpeg, AtomicParsley)</span>
+                    <button class="btn-secondary" onclick="fetchLogs()">Refresh</button>
+                </div>
+                <div id="logsOutput">(no logs loaded yet)</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ARCHIVE TAB -->
+    <div class="tab-panel" id="tab-archive">
+        <div class="card">
+            <div class="toolbar">
+                <h3 style="margin:0;">Recently finished</h3>
+                <button class="btn-secondary" style="font-size:12px; padding:4px 10px;" onclick="runCleanup()">Run cleanup</button>
+            </div>
+            <div id="cleanupResult" class="muted" style="margin-bottom: 8px;"></div>
+            <div id="historyList"></div>
+        </div>
+    </div>
+
+    <!-- SETTINGS TAB -->
+    <div class="tab-panel" id="tab-settings">
+        <div class="card">
+            <h3>Runtime settings</h3>
+            <div class="settings-row">
+                <div class="settings-label">Parallel downloads<span class="muted">Applies immediately</span></div>
+                <div class="row" style="align-items:center;">
+                    <input type="range" id="concurrencyRange" min="1" max="6" value="3" oninput="onConcurrencyInput(this.value)">
+                    <span id="concurrencyValue" class="settings-value">3</span>
+                </div>
+            </div>
+            <div class="settings-row">
+                <div class="settings-label">aria2c connections per download<span class="muted">Applies to downloads started after this change</span></div>
+                <div class="row" style="align-items:center;">
+                    <input type="range" id="aria2Range" min="1" max="32" value="16" oninput="onAria2Input(this.value)">
+                    <span id="aria2Value" class="settings-value">16</span>
+                </div>
+            </div>
+        </div>
+        <div class="card">
+            <h3>Paths <span class="muted">(edit via .env, restart required)</span></h3>
+            <div class="settings-row"><div class="settings-label">Temp / active workspace</div><div class="settings-value" id="cfgTempDir">-</div></div>
+            <div class="settings-row"><div class="settings-label">Finished library (Songs archive)</div><div class="settings-value" id="cfgArchiveDir">-</div></div>
+            <div class="settings-row"><div class="settings-label">Cookies file</div><div class="settings-value" id="cfgCookies">-</div></div>
+            <div class="settings-row"><div class="settings-label">Log file</div><div class="settings-value" id="cfgLogFile">-</div></div>
+        </div>
+    </div>
+
+    <script>
+        let draggedId = null;
+        let isDragging = false;
+        let concurrencyDebounce = null;
+        let aria2Debounce = null;
+        let logsVisible = false;
+        let currentTab = 'queue';
+
+        function switchTab(tab) {
+            currentTab = tab;
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+            document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+            document.getElementById(`tab-${tab}`).classList.add('active');
+            if (tab === 'archive') fetchHistory();
+            if (tab === 'settings') loadSettings();
+        }
+
+        async function addUrls() {
+            const input = document.getElementById('urlInput');
+            const rawText = input.value.trim();
+            if (!rawText) return;
+            input.value = 'Parsing URLs & playlists...';
+            input.disabled = true;
+            await fetch('/api/add', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({raw_input: rawText})
+            });
+            input.value = '';
+            input.disabled = false;
+            fetchQueue();
+        }
+
+        function formatDuration(seconds) {
+            if (!seconds && seconds !== 0) return '';
+            seconds = Math.round(seconds);
+            const m = Math.floor(seconds / 60);
+            const s = seconds % 60;
+            return `${m}:${s.toString().padStart(2, '0')}`;
+        }
+
+        async function searchSongs() {
+            const q = document.getElementById('searchInput').value.trim();
+            if (!q) return;
+            const box = document.getElementById('searchResults');
+            box.innerHTML = '<div class="muted">Searching...</div>';
+            const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+            const data = await res.json();
+            if (!data.results.length) {
+                box.innerHTML = '<div class="muted">No results</div>';
+                return;
+            }
+            box.innerHTML = '';
+            data.results.forEach(r => {
+                const div = document.createElement('div');
+                div.className = 'search-result';
+                const dur = formatDuration(r.duration);
+                div.innerHTML = `
+                    <span class="search-title" title="${r.title}">${r.title}</span>
+                    <span class="search-meta">${r.uploader}${dur ? ' &middot; ' + dur : ''}</span>
+                    <button class="item-action" onclick="addFromSearch('${r.url}')">Add</button>
+                `;
+                box.appendChild(div);
+            });
+        }
+
+        async function addFromSearch(url) {
+            await fetch('/api/add', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({raw_input: url})
+            });
+            fetchQueue();
+        }
+
+        async function removeItem(id) {
+            await fetch(`/api/queue/${id}`, { method: 'DELETE' });
+            fetchQueue();
+        }
+
+        async function retryItem(id) {
+            await fetch(`/api/queue/${id}/retry`, { method: 'POST' });
+            fetchQueue();
+        }
+
+        async function clearFinished() {
+            await fetch('/api/queue', { method: 'DELETE' });
+            fetchQueue();
+        }
+
+        async function runCleanup() {
+            const out = document.getElementById('cleanupResult');
+            out.textContent = 'Running cleanup...';
+            const res = await fetch('/api/cleanup', { method: 'POST' });
+            const data = await res.json();
+            out.textContent = `Removed ${data.removed} leftover file(s) from the temp workspace.`;
+        }
+
+        function onConcurrencyInput(value) {
+            document.getElementById('concurrencyValue').textContent = value;
+            clearTimeout(concurrencyDebounce);
+            concurrencyDebounce = setTimeout(() => {
+                fetch('/api/settings', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({concurrency: parseInt(value, 10)})
+                });
+            }, 300);
+        }
+
+        function onAria2Input(value) {
+            document.getElementById('aria2Value').textContent = value;
+            clearTimeout(aria2Debounce);
+            aria2Debounce = setTimeout(() => {
+                fetch('/api/settings', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({aria2_connections: parseInt(value, 10)})
+                });
+            }, 300);
+        }
+
+        async function loadSettings() {
+            const res = await fetch('/api/settings');
+            const data = await res.json();
+            document.getElementById('concurrencyRange').value = data.concurrency;
+            document.getElementById('concurrencyValue').textContent = data.concurrency;
+            document.getElementById('aria2Range').value = data.aria2_connections;
+            document.getElementById('aria2Value').textContent = data.aria2_connections;
+            document.getElementById('cfgTempDir').textContent = data.temp_workspace_dir;
+            document.getElementById('cfgArchiveDir').textContent = data.songs_archive_dir;
+            document.getElementById('cfgCookies').textContent = data.cookies_file;
+            document.getElementById('cfgLogFile').textContent = data.log_file;
+        }
+
+        function toggleLogs() {
+            logsVisible = !logsVisible;
+            document.getElementById('logsPanel').style.display = logsVisible ? 'block' : 'none';
+            document.getElementById('logsToggleBtn').textContent = logsVisible ? 'Hide raw logs' : 'Show raw logs';
+            if (logsVisible) fetchLogs();
+        }
+
+        async function fetchLogs() {
+            const res = await fetch('/api/logs?lines=200');
+            const data = await res.json();
+            const out = document.getElementById('logsOutput');
+            out.textContent = data.logs || '(log file is empty)';
+            out.scrollTop = out.scrollHeight;
+        }
+
+        async function fetchHistory() {
+            const res = await fetch('/api/history');
+            const data = await res.json();
+            const container = document.getElementById('historyList');
+            if (!data.history.length) {
+                container.innerHTML = '<div class="muted" style="text-align:center; padding:10px;">Nothing finished yet</div>';
+                return;
+            }
+            container.innerHTML = '';
+            data.history.forEach(h => {
+                const div = document.createElement('div');
+                div.className = 'history-item';
+                let statusClass = 'status-text';
+                if (h.status.includes('Completed')) statusClass += ' status-Completed';
+                if (h.status.includes('Error')) statusClass += ' status-Error';
+                if (h.status.includes('Cancel')) statusClass += ' status-Cancelled';
+                const time = new Date(h.finished_at).toLocaleTimeString();
+                div.innerHTML = `
+                    ${h.from_playlist ? '<span class="tag">Playlist</span>' : ''}
+                    <span class="history-title" title="${h.title}">${h.title}</span>
+                    <span class="${statusClass}">${h.status}</span>
+                    <span class="history-meta">${time}</span>
+                `;
+                container.appendChild(div);
+            });
+        }
+
+        async function sendReorder() {
+            const ids = Array.from(document.querySelectorAll('#queueList .queue-item')).map(el => el.dataset.id);
+            await fetch('/api/queue/reorder', {
+                method: 'PATCH', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ids})
+            });
+        }
+
+        function attachDragHandlers(div, item) {
+            div.draggable = true;
+            div.dataset.id = item.id;
+            div.addEventListener('dragstart', () => { draggedId = item.id; isDragging = true; div.classList.add('dragging'); });
+            div.addEventListener('dragend', async () => {
+                isDragging = false;
+                div.classList.remove('dragging');
+                document.querySelectorAll('.queue-item').forEach(el => el.classList.remove('drag-over'));
+                await sendReorder();
+                fetchQueue();
+            });
+            div.addEventListener('dragover', (e) => { e.preventDefault(); if (item.id !== draggedId) div.classList.add('drag-over'); });
+            div.addEventListener('dragleave', () => div.classList.remove('drag-over'));
+            div.addEventListener('drop', (e) => {
+                e.preventDefault();
+                div.classList.remove('drag-over');
+                if (!draggedId || draggedId === item.id) return;
+                const container = document.getElementById('queueList');
+                const draggedEl = container.querySelector(`[data-id="${draggedId}"]`);
+                if (!draggedEl) return;
+                const rect = div.getBoundingClientRect();
+                const after = (e.clientY - rect.top) > rect.height / 2;
+                container.insertBefore(draggedEl, after ? div.nextSibling : div);
+            });
+        }
+
+        function actionButtonsHtml(item) {
+            if (item.status === 'Cancelled' || item.status.startsWith('Error')) {
+                return `
+                    <button class="item-action retry" onclick="retryItem('${item.id}')">Retry</button>
+                    <button class="item-action" onclick="removeItem('${item.id}')">Remove</button>
+                `;
+            }
+            const label = item.status === 'Waiting in queue...' || item.status === 'Completed' ? 'Remove' : 'Cancel';
+            const disabled = item.status === 'Cancelling...';
+            return `<button class="item-action" ${disabled ? 'disabled' : ''} onclick="removeItem('${item.id}')">${label}</button>`;
+        }
+
+        function stepBadgesHtml(steps) {
+            if (!steps) return '';
+            return `<div class="step-row">` + Object.entries(steps).map(([name, state]) =>
+                `<span class="step-badge step-${state}">${name}</span>`
+            ).join('') + `</div>`;
+        }
+
+        function renderQueueItem(item) {
+            const div = document.createElement('div');
+            div.className = 'queue-item';
+            const shortTitle = item.title.length > 46 ? item.title.substring(0, 43) + '...' : item.title;
+
+            let progressHtml = '';
+            const match = item.status.match(/([0-9.]+)%/);
+            if (match) {
+                progressHtml = `<div class="progress-bg"><div class="progress-fill" style="width: ${parseFloat(match[1])}%;"></div></div>`;
+            } else if (item.status === 'Completed' || item.status.includes('Processing') || item.status.includes('Extracting') || item.status.includes('Compressing') || item.status.includes('Embedding') || item.status.includes('Moving')) {
+                progressHtml = `<div class="progress-bg"><div class="progress-fill" style="width: 100%; background: #2e7d32;"></div></div>`;
+            }
+
+            let textClass = 'status-text';
+            if (item.status.includes('Completed')) textClass += ' status-Completed';
+            if (item.status.includes('Error')) textClass += ' status-Error';
+            if (item.status.includes('Cancel')) textClass += ' status-Cancelled';
+
+            div.innerHTML = `
+                <div class="title-row">
+                    <span class="drag-handle">&#9776;</span>
+                    ${item.from_playlist ? '<span class="tag">Playlist</span>' : ''}
+                    <span class="title-text" title="${item.title}">${shortTitle}</span>
+                    <span class="right-group">
+                        <span class="${textClass}">${item.status}</span>
+                        ${actionButtonsHtml(item)}
+                    </span>
+                </div>
+                ${progressHtml}
+            `;
+            attachDragHandlers(div, item);
+            return div;
+        }
+
+        function renderPipelineItem(item) {
+            const div = document.createElement('div');
+            div.className = 'queue-item';
+            div.style.cursor = 'default';
+            const shortTitle = item.title.length > 46 ? item.title.substring(0, 43) + '...' : item.title;
+            let textClass = 'status-text';
+            if (item.status.includes('Completed')) textClass += ' status-Completed';
+            if (item.status.includes('Error')) textClass += ' status-Error';
+            if (item.status.includes('Cancel')) textClass += ' status-Cancelled';
+            div.innerHTML = `
+                <div class="title-row">
+                    ${item.from_playlist ? '<span class="tag">Playlist</span>' : ''}
+                    <span class="title-text" title="${item.title}">${shortTitle}</span>
+                    <span class="${textClass}">${item.status}</span>
+                </div>
+                ${stepBadgesHtml(item.steps)}
+            `;
+            return div;
+        }
+
+        async function fetchQueue() {
+            const res = await fetch('/api/queue');
+            const data = await res.json();
+
+            if (!isDragging) {
+                const container = document.getElementById('queueList');
+                if (data.queue.length === 0) {
+                    container.innerHTML = '<div class="muted" style="text-align:center; padding: 10px;">Queue is empty</div>';
+                } else {
+                    container.innerHTML = '';
+                    data.queue.forEach(item => container.appendChild(renderQueueItem(item)));
+                }
+            }
+
+            if (currentTab === 'pipeline') {
+                const pContainer = document.getElementById('pipelineList');
+                const activeItems = data.queue.filter(i => i.status !== 'Waiting in queue...');
+                if (activeItems.length === 0) {
+                    pContainer.innerHTML = '<div class="muted" style="text-align:center; padding: 10px;">Nothing in progress</div>';
+                } else {
+                    pContainer.innerHTML = '';
+                    activeItems.forEach(item => pContainer.appendChild(renderPipelineItem(item)));
+                }
+            }
+        }
+
+        loadSettings();
+        setInterval(() => {
+            fetchQueue();
+            if (currentTab === 'archive') fetchHistory();
+        }, 1000);
+        fetchQueue();
+    </script>
+</body>
+</html>
