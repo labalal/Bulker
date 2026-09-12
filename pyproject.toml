@@ -1,0 +1,42 @@
+[project]
+name = "music-downloader"
+version = "0.1.0"
+description = "FastAPI + yt-dlp bulk audio downloader with AtomicParsley tagging"
+readme = "README.md"
+authors = [
+    { name = "a3hhhhh", email = "216126773+a3hhhhh@users.noreply.github.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.141.1",
+    "pydantic>=2.13.5",
+    "python-dotenv>=1.2.3",
+    "uvicorn[standard]>=0.52.4",
+    "yt-dlp>=2026.8.19",
+]
+
+[project.scripts]
+music-downloader = "music_downloader:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "bandit>=1.9.4",
+    "mypy>=2.3.1",
+    "ruff>=0.16.7",
+]
+[tool.ruff]
+line-length = 100
+[tool.mypy]
+python_version = "3.14"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+check_untyped_defs = true
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv"]
+skips = ["B101"]
