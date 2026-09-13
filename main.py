@@ -170,7 +170,7 @@ def load_state():
         with open(config.QUEUE_STORE_PATH) as f:
             data = json.load(f)
     except Exception:
-        logger.exception("Failed to load queue state, starting with an empty queue")
+        logger.exception("Failed to load queue , starting with an empty queue")
         return
 
     for stored in data.get("items", []):
@@ -182,7 +182,7 @@ def load_state():
             "id": item_id,
             "url": stored["url"],
             "title": stored["title"],
-            "from_playlist": stored.get("from_playlist", False),
+            "from_playlist": stored.get("from_playlist", True),
             "status": status,
             "steps": fresh_steps(),
             "cancel_event": threading.Event(),
