@@ -18,7 +18,9 @@ from downloader import (
     STEP_NAMES,
     DownloadCancelled,
     cleanup_existing_mess,
+    cookie_source_label,
     download_audio,
+    list_audio_formats,
     list_entries,
     parse_input_urls,
     search_videos,
@@ -94,6 +96,7 @@ limiter = ConcurrencyLimiter(limit=config.DEFAULT_CONCURRENCY)
 
 class BulkURLRequest(BaseModel):
     raw_input: str
+    format_selector: str | None = None
 
 
 class SearchQuery(BaseModel):
@@ -109,12 +112,13 @@ class SettingsRequest(BaseModel):
     aria2_connections: int | None = None
 
 
-def make_item(url: str, title: str, from_playlist: bool = False) -> dict:
+def make_item(url: str, title: str, from_playlist: bool = False, format_selector: str | None = None) -> dict:
     return {
         "id": str(uuid.uuid4())[:8],
         "url": url,
         "title": title,
         "from_playlist": from_playlist,
+        "format_selector": format_selector,
         "status": "Waiting in queue...",
         "steps": fresh_steps(),
         "cancel_event": threading.Event(),
@@ -148,6 +152,7 @@ def save_state():
                 "url": item["url"],
                 "title": item["title"],
                 "from_playlist": item.get("from_playlist", False),
+                "format_selector": item.get("format_selector"),
                 "status": item["status"],
             }
             for item in items.values()
@@ -183,6 +188,7 @@ def load_state():
             "url": stored["url"],
             "title": stored["title"],
             "from_playlist": stored.get("from_playlist", True),
+            "format_selector": stored.get("format_selector"),
             "status": status,
             "steps": fresh_steps(),
             "cancel_event": threading.Event(),
@@ -253,6 +259,7 @@ async def worker():
                     on_progress,
                     item["cancel_event"],
                     runtime_settings.aria2_connections,
+                    item.get("format_selector"),
                 )
                 if item["cancel_event"].is_set():
                     item["status"] = "Cancelled"
@@ -307,7 +314,12 @@ async def add_to_queue(req: BulkURLRequest):
 
         async with queue_lock:
             for entry in entries:
-                item = make_item(entry["url"], entry["title"], entry.get("from_playlist", False))
+                item = make_item(
+                    entry["url"],
+                    entry["title"],
+                    entry.get("from_playlist", False),
+                    req.format_selector,
+                )
                 items[item["id"]] = item
                 order.append(item["id"])
                 added_ids.append(item["id"])
@@ -323,6 +335,29 @@ async def search(q: str, limit: int | None = None):
         return {"results": []}
     results = await asyncio.to_thread(search_videos, q, limit or config.SEARCH_RESULT_LIMIT)
     return {"results": results}
+
+
+@app.get("/api/formats")
+async def formats(url: str):
+    """List audio-only formats for one video so the caller can pick once."""
+    if not url.strip():
+        raise HTTPException(status_code=400, detail="url is required")
+    try:
+        fmts = await asyncio.to_thread(list_audio_formats, url.strip())
+    except Exception as e:
+        logger.exception("format listing failed for %s", url)
+        raise HTTPException(status_code=502, detail=f"format listing failed: {e}") from e
+    return {"formats": fmts, "default": config.AUDIO_FORMAT_SELECTOR}
+
+
+@app.get("/api/cookies/status")
+def cookies_status():
+    return {
+        "source": cookie_source_label(),
+        "from_browser": config.COOKIES_FROM_BROWSER,
+        "cookies_file": config.COOKIES_FILE,
+        "cookies_file_exists": os.path.exists(config.COOKIES_FILE),
+    }
 
 
 @app.get("/api/queue")
@@ -416,6 +451,8 @@ def get_settings():
         "temp_workspace_dir": config.TEMP_WORKSPACE_DIR,
         "songs_archive_dir": config.SONGS_ARCHIVE_DIR,
         "cookies_file": config.COOKIES_FILE,
+        "cookies_source": cookie_source_label(),
+        "default_format_selector": config.AUDIO_FORMAT_SELECTOR,
         "log_file": config.LOG_FILE,
     }
 

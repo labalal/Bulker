@@ -41,6 +41,29 @@ class YTDLPLogger:
         logger.error(msg)
 
 
+def _cookie_opts() -> dict:
+    """Firefox-first cookie selection.
+
+    Prefers live Firefox profile cookies (COOKIES_FROM_BROWSER, default
+    "firefox") so no manual export step is needed. Falls back to the
+    cookies.txt file when it exists. Returns {} when neither applies.
+    """
+    if config.COOKIES_FROM_BROWSER:
+        return {"cookiesfrombrowser": (config.COOKIES_FROM_BROWSER,)}
+    if config.COOKIES_FILE and os.path.exists(config.COOKIES_FILE):
+        return {"cookiefile": config.COOKIES_FILE}
+    return {}
+
+
+def cookie_source_label() -> str:
+    """Human-readable label for /api/cookies/status."""
+    if config.COOKIES_FROM_BROWSER:
+        return f"browser:{config.COOKIES_FROM_BROWSER} (+{config.COOKIES_FILE} fallback)"
+    if config.COOKIES_FILE and os.path.exists(config.COOKIES_FILE):
+        return f"file:{config.COOKIES_FILE}"
+    return "none (anonymous -- age-restricted / Premium streams will fail)"
+
+
 def cleanup_existing_mess():
     """Rescues old audio files to Songs_archive and deletes the rest."""
     archive_dir = config.SONGS_ARCHIVE_DIR
@@ -267,10 +290,10 @@ def list_entries(url: str) -> list[dict]:
     ydl_opts = {
         "quiet": True,
         "skip_download": True,
-        "cookiefile": config.COOKIES_FILE,
         "extract_flat": "in_playlist",
         "extractor_args": {"youtube": {"player-client": ["android", "web"]}},
         "logger": YTDLPLogger(),
+        **_cookie_opts(),
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
@@ -319,11 +342,11 @@ def search_videos(query: str, limit: int = 8) -> list[dict]:
     ydl_opts = {
         "quiet": True,
         "skip_download": True,
-        "cookiefile": config.COOKIES_FILE,
         "extract_flat": "in_playlist",
         "playlist_items": f"1-{max(1, limit)}",
         "extractor_args": {"youtube": {"player-client": ["android", "web"]}},
         "logger": YTDLPLogger(),
+        **_cookie_opts(),
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -351,6 +374,45 @@ def search_videos(query: str, limit: int = 8) -> list[dict]:
     return results
 
 
+def list_audio_formats(url: str) -> list[dict]:
+    """Returns the audio-only formats yt-dlp sees for one video, so the UI
+    (or extension) can let you pick exactly once instead of guessing.
+
+    Each entry: {id, ext, acodec, abr, note}. Sorted best-first.
+    """
+    url = to_music_youtube_url(url)
+    ydl_opts = {
+        "quiet": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "extractor_args": {"youtube": {"player-client": ["android", "web"]}},
+        "logger": YTDLPLogger(),
+        **_cookie_opts(),
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    if not info:
+        return []
+    formats = []
+    for f in info.get("formats") or []:
+        # Keep audio-only (or audio+video fallback with audio codec).
+        if f.get("vcodec") not in (None, "none"):
+            continue
+        if f.get("acodec") in (None, "none"):
+            continue
+        formats.append(
+            {
+                "id": f.get("format_id"),
+                "ext": f.get("ext"),
+                "acodec": f.get("acodec"),
+                "abr": f.get("abr") or f.get("tbr"),
+                "note": f.get("format_note") or "",
+            }
+        )
+    formats.sort(key=lambda f: (f["abr"] or 0), reverse=True)
+    return formats
+
+
 def get_video_title(url: str) -> str:
     """Kept for backwards compatibility; list_entries() is now used for queueing."""
     entries = list_entries(url)
@@ -364,6 +426,7 @@ def download_audio(
     on_progress=None,
     cancel_event: threading.Event | None = None,
     aria2_connections: int | None = None,
+    format_selector: str | None = None,
 ):
     """on_progress(step: str, state: 'active'|'done'|'failed', detail: str)
     is called at every pipeline transition (Download, Extract Audio,
@@ -401,9 +464,8 @@ def download_audio(
                 on_progress("Extract Audio", "active", "Extracting audio (Opus)...")
 
     ydl_opts = {
-        "format": config.AUDIO_FORMAT_SELECTOR,
+        "format": format_selector or config.AUDIO_FORMAT_SELECTOR,
         "outtmpl": f"{config.TEMP_WORKSPACE_DIR}/%(title)s [%(id)s].%(ext)s",
-        "cookiefile": config.COOKIES_FILE,
         "download_archive": config.ARCHIVE_FILE,
         "noplaylist": True,
         "nooverwrites": True,
@@ -435,6 +497,7 @@ def download_audio(
         "extractor_args": {"youtube": {"player-client": ["android", "web"]}},
         "progress_hooks": [hook],
         "logger": YTDLPLogger(),
+        **_cookie_opts(),
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
