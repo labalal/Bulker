@@ -1,11 +1,15 @@
+import base64
 import logging
 import os
 import re
 import shutil
 import subprocess
 import threading
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 import yt_dlp
+from mutagen.flac import Picture
+from mutagen.oggopus import OggOpus
 
 import config
 
@@ -38,7 +42,7 @@ class YTDLPLogger:
 
 
 def cleanup_existing_mess():
-    """Rescues old m4a files to Songs_archive and deletes the rest."""
+    """Rescues old audio files to Songs_archive and deletes the rest."""
     archive_dir = config.SONGS_ARCHIVE_DIR
     os.makedirs(archive_dir, exist_ok=True)
     os.makedirs(config.TEMP_WORKSPACE_DIR, exist_ok=True)
@@ -46,10 +50,11 @@ def cleanup_existing_mess():
     if not os.path.exists(config.DOWNLOAD_DIR):
         return
 
+    audio_exts = (".opus", ".m4a")  # .m4a kept so old libraries still get rescued
     for root, _, files in os.walk(config.DOWNLOAD_DIR):
         for file in files:
             full_path = os.path.join(root, file)
-            if file.endswith(".m4a"):
+            if file.endswith(audio_exts):
                 try:
                     shutil.move(full_path, os.path.join(archive_dir, file))
                 except OSError:
@@ -61,11 +66,13 @@ def cleanup_existing_mess():
                     logger.exception("Could not remove leftover %s", full_path)
 
 
-class AtomicParsleyPP(yt_dlp.postprocessor.PostProcessor):
-    """Compresses the thumbnail, embeds it + title/artist with
-    AtomicParsley, then moves the finished file into Songs_archive.
-    Reports each of those steps through on_progress so the UI can show a
-    green/red status per step instead of a black box."""
+class OpusTagPP(yt_dlp.postprocessor.PostProcessor):
+    """Compresses the thumbnail, embeds it + title/artist into the Opus
+    file's Vorbis comments with mutagen (AtomicParsley only understands
+    MP4/M4A, not Ogg/Opus), then moves the finished file into
+    Songs_archive. Reports each step through on_progress so the UI can
+    show a green/red status per step instead of a black box.
+    """
 
     def __init__(self, on_progress=None, cancel_event: threading.Event | None = None):
         super().__init__()
@@ -81,7 +88,7 @@ class AtomicParsleyPP(yt_dlp.postprocessor.PostProcessor):
         title = info.get("title", "Unknown Title")
         artist = info.get("artist") or info.get("uploader") or "Unknown Artist"
 
-        self._report("Extract Audio", "done", "Audio extracted")
+        self._report("Extract Audio", "done", "Audio extracted (Opus)")
 
         if self.cancel_event is not None and self.cancel_event.is_set():
             # Cancelled right after extraction -- clean up the orphaned
@@ -97,8 +104,10 @@ class AtomicParsleyPP(yt_dlp.postprocessor.PostProcessor):
             self._report("Thumbnail", "failed", "Source audio file missing")
             return [], info
 
-        if not filepath.endswith(".m4a"):
-            filepath = os.path.splitext(filepath)[0] + ".m4a"
+        # FFmpegExtractAudioPP already rewrote filepath/ext to .opus (or
+        # left it alone if it was already a native Opus stream copy).
+        if not filepath.endswith(".opus"):
+            filepath = os.path.splitext(filepath)[0] + ".opus"
 
         base_path = os.path.splitext(filepath)[0]
         thumb_path = base_path + ".jpg"
@@ -137,26 +146,29 @@ class AtomicParsleyPP(yt_dlp.postprocessor.PostProcessor):
             self._report("Thumbnail", "done", "No thumbnail found, skipped")
 
         # --- metadata ------------------------------------------------------
-        self._report("Metadata", "active", "Embedding metadata (AtomicParsley)...")
-        atomicparsley_cmd = [
-            "atomicparsley",
-            filepath,
-            "--title",
-            title,
-            "--artist",
-            artist,
-            "--overWrite",
-        ]
-        if compressed_thumb and os.path.exists(compressed_thumb):
-            atomicparsley_cmd[4:4] = ["--artwork", compressed_thumb]
+        self._report("Metadata", "active", "Embedding metadata (mutagen/Opus)...")
+        try:
+            audio = OggOpus(filepath)
+            audio["title"] = title
+            audio["artist"] = artist
 
-        result = subprocess.run(atomicparsley_cmd, capture_output=True, text=True, check=False)
-        if result.returncode == 0:
+            if compressed_thumb and os.path.exists(compressed_thumb):
+                pic = Picture()
+                with open(compressed_thumb, "rb") as f:
+                    pic.data = f.read()
+                pic.type = 3  # front cover
+                pic.mime = "image/jpeg"
+                pic.desc = "Cover"
+                audio["metadata_block_picture"] = [
+                    base64.b64encode(pic.write()).decode("ascii")
+                ]
+
+            audio.save()
             logger.info("Metadata embedded for: %s", title)
             self._report("Metadata", "done", "Metadata embedded")
-        else:
-            logger.error("AtomicParsley failed for %s: %s", title, result.stderr[-800:])
-            self._report("Metadata", "failed", "Metadata embed failed")
+        except Exception as e:  # noqa: BLE001
+            logger.error("mutagen tagging failed for %s: %s", title, e)
+            self._report("Metadata", "failed", f"Metadata embed failed: {e}")
 
         # --- archive ------------------------------------------------------
         self._report("Archive", "active", "Moving to archive...")
@@ -186,6 +198,47 @@ class AtomicParsleyPP(yt_dlp.postprocessor.PostProcessor):
         return [], info
 
 
+def to_music_youtube_url(url: str) -> str:
+    """Rewrites any youtube.com / youtu.be / m.youtube.com link into the
+    equivalent music.youtube.com link.
+
+    This is what actually controls quality, not a yt-dlp option: YouTube
+    only exposes the ~256kbps Premium Opus itag (774) through the Music
+    surface. The exact same video watched via a plain youtube.com watch
+    URL commonly only offers the ~128-160kbps Opus itag (251), even with
+    valid Premium cookies. So every URL needs to go in as
+    music.youtube.com for the higher-bitrate / lower-compression stream
+    to even be on the table.
+    """
+    had_scheme = "://" in url
+    parsed = urlparse(url if had_scheme else f"https://{url}")
+    host = parsed.netloc.lower()
+    if host == "music.youtube.com":
+        return url
+    if host not in ("www.youtube.com", "youtube.com", "m.youtube.com", "youtu.be"):
+        return url  # not a YouTube URL at all -- leave it alone
+
+    qs = parse_qs(parsed.query)
+    video_id = None
+    if host == "youtu.be":
+        video_id = parsed.path.lstrip("/").split("/")[0] or None
+    elif parsed.path.startswith("/shorts/"):
+        video_id = parsed.path.split("/shorts/")[1].split("/")[0]
+    elif "v" in qs:
+        video_id = qs["v"][0]
+
+    if video_id:
+        new_qs = {"v": video_id}
+        if "list" in qs:
+            new_qs["list"] = qs["list"][0]
+        return f"https://music.youtube.com/watch?{urlencode(new_qs)}"
+
+    if "list" in qs:
+        return f"https://music.youtube.com/playlist?{urlencode({'list': qs['list'][0]})}"
+
+    return url  # couldn't find a video/playlist id -- leave it alone
+
+
 def parse_input_urls(raw_input: str) -> list[str]:
     lines = raw_input.splitlines()
     urls = []
@@ -194,7 +247,7 @@ def parse_input_urls(raw_input: str) -> list[str]:
         if not cleaned:
             continue
         cleaned = re.sub(r"&(si|ab_channel|pp|feature)=[^&]+", "", cleaned)
-        urls.append(cleaned)
+        urls.append(to_music_youtube_url(cleaned))
     return urls
 
 
@@ -203,13 +256,14 @@ def _flatten_entry(entry: dict) -> str | None:
     if not entry_url:
         return None
     if not str(entry_url).startswith("http"):
-        entry_url = f"https://www.youtube.com/watch?v={entry_url}"
-    return str(entry_url)
+        entry_url = f"https://music.youtube.com/watch?v={entry_url}"
+    return to_music_youtube_url(str(entry_url))
 
 
 def list_entries(url: str) -> list[dict]:
     """Expands a pasted URL into individual entries. Playlists become one
     entry per video, tagged from_playlist=True so the UI can badge them."""
+    url = to_music_youtube_url(url)
     ydl_opts = {
         "quiet": True,
         "skip_download": True,
@@ -255,23 +309,26 @@ def list_entries(url: str) -> list[dict]:
 
 
 def search_videos(query: str, limit: int = 8) -> list[dict]:
-    """Search YouTube directly instead of needing a pasted link."""
+    """Search directly on music.youtube.com (not a generic ytsearch:),
+    so results are songs from the Music catalog/surface and the itags
+    yt-dlp sees for them include the high-bitrate Music-only streams."""
     if not query.strip():
         return []
 
+    search_url = f"https://music.youtube.com/search?q={quote(query)}"
     ydl_opts = {
         "quiet": True,
         "skip_download": True,
         "cookiefile": config.COOKIES_FILE,
         "extract_flat": "in_playlist",
+        "playlist_items": f"1-{max(1, limit)}",
         "extractor_args": {"youtube": {"player-client": ["android", "web"]}},
         "logger": YTDLPLogger(),
     }
-    search_key = f"ytsearch{max(1, limit)}:{query}"
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
-            info = ydl.extract_info(search_key, download=False)
+            info = ydl.extract_info(search_url, download=False)
         except Exception:
             logger.exception("search_videos failed for query %r", query)
             return []
@@ -311,7 +368,17 @@ def download_audio(
     """on_progress(step: str, state: 'active'|'done'|'failed', detail: str)
     is called at every pipeline transition (Download, Extract Audio,
     Thumbnail, Metadata, Archive) so the caller can render a live step
-    tracker instead of a single opaque status string."""
+    tracker instead of a single opaque status string.
+
+    Quality: AUDIO_FORMAT_SELECTOR asks for the best *native Opus*
+    stream your cookies are entitled to (up to 256kbps on YouTube
+    Premium, ~128-160kbps on a free account -- see config.py). Because
+    the extraction target codec matches that source codec, yt-dlp does
+    a lossless stream copy instead of re-encoding, so whatever bitrate
+    YouTube served is exactly what ends up in the archive -- no extra
+    lossy generation loss on top, unlike transcoding to a fixed-bitrate
+    MP3/AAC.
+    """
 
     aria2_connections = aria2_connections or config.ARIA2C_CONNECTIONS
 
@@ -331,10 +398,10 @@ def download_audio(
         elif d["status"] == "finished":
             if on_progress:
                 on_progress("Download", "done", "Download complete")
-                on_progress("Extract Audio", "active", "Extracting audio (ffmpeg)...")
+                on_progress("Extract Audio", "active", "Extracting audio (Opus)...")
 
     ydl_opts = {
-        "format": "bestaudio/best",
+        "format": config.AUDIO_FORMAT_SELECTOR,
         "outtmpl": f"{config.TEMP_WORKSPACE_DIR}/%(title)s [%(id)s].%(ext)s",
         "cookiefile": config.COOKIES_FILE,
         "download_archive": config.ARCHIVE_FILE,
@@ -348,13 +415,22 @@ def download_audio(
         },
         "postprocessors": [
             {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
-            {"key": "FFmpegExtractAudio", "preferredcodec": "m4a"},
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": config.AUDIO_CODEC,
+                # Only used if yt-dlp actually has to transcode (source
+                # wasn't already Opus). When source == target codec,
+                # yt-dlp stream-copies losslessly and ignores this.
+                "preferredquality": config.FALLBACK_TRANSCODE_BITRATE,
+            },
         ],
         "postprocessor_args": {
-            # loudnorm was removed -- it re-analyzes the whole file in a
-            # second pass and was burning a lot of CPU/RAM for marginal
-            # benefit at this volume of downloads.
-            "ffmpeg": ["-c:a", "aac", "-b:a", "96k", "-threads", "0"]
+            # Just speeds up the ffmpeg calls; does not force a codec, so
+            # it can't clobber the -acodec choice made above (the old
+            # pipeline's "-c:a aac -b:a 96k" here was quietly re-encoding
+            # every download down to 96kbps AAC regardless of source
+            # quality -- that's gone now).
+            "ffmpeg": ["-threads", "0"]
         },
         "extractor_args": {"youtube": {"player-client": ["android", "web"]}},
         "progress_hooks": [hook],
@@ -362,5 +438,5 @@ def download_audio(
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.add_post_processor(AtomicParsleyPP(on_progress=on_progress, cancel_event=cancel_event))
+        ydl.add_post_processor(OpusTagPP(on_progress=on_progress, cancel_event=cancel_event))
         ydl.download([url])
