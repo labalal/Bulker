@@ -1,0 +1,30 @@
+/* Floating overlay button injected by content.js */
+#md-send-to-queue {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 999999;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 999px;
+  background: #000;
+  color: #fff;
+  font: 600 13px/1 system-ui, -apple-system, sans-serif;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  opacity: 0.92;
+}
+#md-send-to-queue:hover { opacity: 1; }
+#md-toast {
+  position: fixed;
+  right: 18px;
+  bottom: 64px;
+  z-index: 999999;
+  max-width: 320px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #111;
+  color: #eee;
+  font: 12px/1.4 system-ui, -apple-system, sans-serif;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}

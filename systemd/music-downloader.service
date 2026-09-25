@@ -1,0 +1,16 @@
+[Unit]
+Description=Music Downloader (FastAPI + yt-dlp)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# EDIT WorkingDirectory to your checkout path before enabling.
+WorkingDirectory=%h/Projects/music_downloader
+ExecStart=%h/Projects/music_downloader/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=3
+Environment=COOKIES_FROM_BROWSER=firefox
+
+[Install]
+WantedBy=default.target

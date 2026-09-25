@@ -1,0 +1,20 @@
+{
+  "manifest_version": 2,
+  "name": "Music Downloader — Send to Queue",
+  "version": "0.1.0",
+  "description": "Overlay button on YouTube / YouTube Music: send the current video to your local music-downloader queue in one click.",
+  "permissions": ["http://localhost:8000/*", "http://127.0.0.1:8000/*"],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://www.youtube.com/*",
+        "*://youtube.com/*",
+        "*://m.youtube.com/*",
+        "*://music.youtube.com/*"
+      ],
+      "js": ["content.js"],
+      "css": ["overlay.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

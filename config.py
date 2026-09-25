@@ -11,6 +11,12 @@ except ImportError:
     pass
 
 COOKIES_FILE = os.getenv("COOKIES_FILE", "cookies.txt")
+# Live-browser cookies (Firefox-only setup, per your environment).
+# When set (default "firefox"), yt-dlp reads cookies straight from your
+# running Firefox profile via --cookies-from-browser, so you never have
+# to manually export cookies.txt. Falls back to COOKIES_FILE if the
+# browser read fails. Set to "" to disable and use cookies.txt only.
+COOKIES_FROM_BROWSER = os.getenv("COOKIES_FROM_BROWSER", "firefox")
 ARCHIVE_FILE = os.getenv("ARCHIVE_FILE", "archive.txt")  # yt-dlp's own dedupe file
 
 # Legacy folder some old downloads may still be sitting in (rescued into
