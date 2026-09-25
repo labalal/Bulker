@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <h1>🎵 Music Downloader</h1>
+  <div id="status" class="muted">Checking server…</div>
+
+  <div class="section">
+    <div class="label">Current tab</div>
+    <div id="tabUrl" class="url">…</div>
+  </div>
+
+  <div class="section">
+    <div class="label">Audio format <span class="muted">(loaded once per video)</span></div>
+    <select id="formatSelect" disabled>
+      <option>Loading formats…</option>
+    </select>
+  </div>
+
+  <div class="row">
+    <button id="sendBtn" disabled>⬇ Send to queue</button>
+    <button id="openUiBtn" class="secondary" title="Open the full web UI">Open UI</button>
+  </div>
+  <div id="sendMsg" class="muted"></div>
+
+  <div class="section">
+    <div class="label">Queue <span id="queueCount" class="muted"></span></div>
+    <div id="queueList" class="muted">…</div>
+  </div>
+
+<script src="popup.js"></script>
+</body>
+</html>

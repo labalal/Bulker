@@ -1,34 +1,62 @@
-# Firefox extension (dev scaffold)
+# Firefox extension — setup & how it all works together
 
-One-click overlay so you never copy-paste video links manually.
+Two pieces that talk to each other:
 
-## What it does
+```
+YouTube page ──overlay button / toolbar popup──▶ http://localhost:8000/api/* ──▶ queue ──▶ Songs_archive/
+   (content.js / popup.js)            (FastAPI in main.py)          (downloader.py + yt-dlp)
+```
 
-`content.js` is injected into `youtube.com` / `music.youtube.com` watch
-pages (see `manifest.json` → `content_scripts`, MDN: *user_interface*).
-It adds a floating **⬇ Send to Downloader** button that POSTs the
-current page URL to `http://localhost:8000/api/add` (your FastAPI
-service). CORS on the service already allows this.
+No cookies ever leave Firefox: auth stays server-side via
+yt-dlp `--cookies-from-browser firefox` (see `GET /api/cookies/status`).
 
-No `cookies` / `webRequest` API is used — the extension never touches
-your login cookies. All Premium/auth handling stays server-side via
-yt-dlp's `--cookies-from-browser firefox` (see `/api/cookies/status`).
+## 1. Start the server (pick one)
 
-## Install temporarily (Firefox)
+**Terminal (simplest):**
+```
+uv sync
+uv run uvicorn main:app --host 127.0.0.1 --port 8000
+```
+Open http://localhost:8000 — the full web UI.
 
-1. Start the service: `uv run uvicorn main:app --port 8000`
-   (or install the systemd user service in `../systemd/`).
-2. Open `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on…**
-3. Select this folder's `manifest.json`.
-4. Open any YouTube / YT Music video → click **⬇ Send to Downloader**.
+**As a background service (recommended):**
+```
+mkdir -p ~/.config/systemd/user
+cp systemd/music-downloader.service ~/.config/systemd/user/
+# edit WorkingDirectory inside the file if your checkout lives elsewhere
+systemctl --user daemon-reload
+systemctl --user enable --now music-downloader
+systemctl --user status music-downloader
+curl localhost:8000/api/cookies/status
+```
+Needs `ffmpeg`, `aria2c` on PATH (`sudo pacman -S ffmpeg aria2`).
 
-## Next steps (not yet done)
+## 2. Install the extension (temporary, dev mode)
 
-- `cookies` API + `browser.cookies.getAll({domain})` export button, if you
-  ever want a one-click `cookies.txt` refresh instead of
-  `--cookies-from-browser`.
-- Page-action popup listing `/api/formats?url=<current>` so you can pick
-  the exact audio format once before queueing.
-- `web-ext run` / `web-ext lint` wiring for automated testing with a
-  real browser (say the word and I'll add it — happy to test against a
-  browser you set up).
+1. Open `about:debugging#/runtime/this-firefox`.
+2. **Load Temporary Add-on…** → select this folder's `manifest.json`.
+3. A 🎵 icon appears in the toolbar. It stays until you restart Firefox
+   (re-load after restart; permanent signing comes later if you want it).
+
+## 3. Use it
+
+**Overlay (zero clicks of copy-paste):** open any YouTube / YT Music
+video → floating **⬇ Send to Downloader** button → toast confirms.
+Uses the default best-Opus selector.
+
+**Popup app (toolbar icon):**
+- Shows server + cookie status, the current tab URL.
+- Loads that video's **audio formats once** into a dropdown
+  (`GET /api/formats`), Auto = best Opus by default.
+- **Send to queue** posts `{raw_input, format_selector}` to `/api/add`.
+- Mini queue view (last 6) + **Open UI** button for the full page.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Popup: "Server not reachable" | Start the server / service on `:8000` first |
+| "Open a YouTube video…" | Popup only sends youtube.com / music.youtube.com tabs |
+| Format list fails but Send works | Video blocked the probe; it queues with Auto selector |
+| Overlay button missing | Only on `/watch` and `/shorts/` pages; reload the tab (SPA nav) |
+| Age-restricted / Premium 256k missing | Firefox must be running, same user, logged in; check `/api/cookies/status` |
