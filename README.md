@@ -64,12 +64,28 @@ curl '127.0.0.1:8000/api/quality?url=<url>'           # while the server runs
 Every completed download also logs a **quality receipt** with its delivered
 kbps in app.log.
 
+## Downloaded-music library (your 10 GB budget)
+
+Every finished download is catalogued — title, artist, YouTube itag,
+delivered kbps, file path, download time, and total GiB spent. Re-downloading
+a track at a different quality appends a new row, so you can see quality
+changes over time:
+
+```bash
+uv run python -m cli songs        # Python (reads library.json, works offline)
+./rust/target/release/bulker-rs songs   # Rust (reads queue.db SQLite)
+curl '127.0.0.1:8000/api/songs'            # JSON from a running server
+```
+
+Python keeps `library.json`; the Rust build stores identical data in SQLite
+(`queue.db`, table `songs`).
+
 ## CLI
 
 ```bash
 uv run python -m cli --help
 uv run python -m cli add <url>...   status   retry <id>   delete <id>
-uv run python -m cli clear          cleanup  logs
+uv run python -m cli clear          cleanup  songs   logs
 ```
 
 ## Cookies

@@ -251,6 +251,16 @@ async fn process_item(item: &Item, cancel: Arc<AtomicBool>) {
                 let report = |step: &str, state_str: &str, detail: &str| {
                     set_step(item, step, state_str, detail);
                 };
+                // meta.opus_path / meta.thumb_path are moved into
+                // finalize_pipeline; grab a clone of everything record_library
+                // still needs before that move.
+                let library = (
+                    meta.title.clone(),
+                    meta.artist.clone(),
+                    meta.duration,
+                    meta.best_opus_kbps,
+                    meta.selected_format_id.clone(),
+                );
                 match tag::finalize_pipeline(
                     meta.opus_path,
                     meta.thumb_path,
@@ -262,6 +272,7 @@ async fn process_item(item: &Item, cancel: Arc<AtomicBool>) {
                     Ok(path) => {
                         info!("Completed: {} -> {}", item.title, path.display());
                         set_status(item, "Completed");
+                        record_library(item, &library, &path);
                         record_history(item);
                         final_error = None;
                         break;
@@ -578,8 +589,32 @@ async fn get_queue() -> Json<serde_json::Value> {
     Json(json!({"queue": queue}))
 }
 
-async fn get_history() -> Json<serde_json::Value> {
-    let last50: Vec<HistoryEntry> = state()
+/// Catalog the finished song into SQLite: what you have, at what quality.
+fn record_library(
+    item: &Item,
+    library: &(String, String, Option<f64>, f64, Option<String>),
+    final_path: &std::path::Path,
+) {
+    let size_bytes = std::fs::metadata(final_path).map(|m| m.len()).unwrap_or(0);
+    let delivered_kbps = library
+        .2
+        .filter(|d| *d > 0.0 && size_bytes > 0)
+        .map(|d| (size_bytes * 8 / 1000) as f64 / d);
+    let song = db::SongRow {
+        video_id: ytdlp::query_param(&item.url, "v").unwrap_or_default(),
+        title: library.0.clone(),
+        artist: library.1.clone(),
+        itag: library.4.clone(),
+        abr: if library.3 > 0.0 { Some(library.3) } else { None },
+        delivered_kbps,
+        size_bytes: size_bytes as i64,
+        path: final_path.display().to_string(),
+        downloaded_at: iso_now(),
+    };
+    db::insert_song(&state().db, &song);
+}
+
+async fn get_history() -> Json<serde_json::Value> {    let last50: Vec<HistoryEntry> = state()
         .history
         .lock()
         .unwrap()
@@ -780,8 +815,51 @@ async fn get_quality(Query(q): Query<QualityQ>) -> Json<serde_json::Value> {
     Json(ytdlp::check_quality(&q.url).await)
 }
 
+async fn get_songs() -> Json<serde_json::Value> {
+    let (songs, total, total_bytes) = db::list_songs(&state().db);
+    Json(json!({
+        "songs": songs,
+        "total": total,
+        "total_bytes": total_bytes,
+        "total_gib": (total_bytes as f64 / (1024.0 * 1024.0 * 1024.0) * 100.0).round() / 100.0,
+    }))
+}
+
 /// CLI subcommand: `bulker-rs check <url>` -- runs against yt-dlp directly,
 /// no server needed. Part of the "CLI tools" role.
+async fn cli_songs() {
+    config::init();
+    let Ok(connect) = rusqlite::Connection::open(&config().queue_db_path) else {
+        eprintln!("error: no catalog yet ({} not found)", config().queue_db_path);
+        std::process::exit(1);
+    };
+    let (songs, total, total_bytes) = {
+        // Reuse the shared helpers through a temporary handle.
+        let database = db::Db(Mutex::new(connect));
+        db::list_songs(&database)
+    };
+    if total == 0 {
+        println!("library is empty");
+        return;
+    }
+    let gib = total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    println!("{total} song(s), {gib:.2} GiB spent of your disk budget:");
+    for s in songs {
+        let quality = s
+            .delivered_kbps
+            .map(|k| format!("{k:.0} kbps"))
+            .unwrap_or_else(|| "n/a".into());
+        println!(
+            "  [{}] {} -- {} ({quality}, {itag})",
+            s.video_id,
+            s.title,
+            s.artist,
+            itag = s.itag.as_deref().unwrap_or("?")
+        );
+        println!("      {} @ {}", s.path, s.downloaded_at);
+    }
+}
+
 async fn cli_check(url: &str) {
     config::init();
     let result = ytdlp::check_quality(url).await;
@@ -798,12 +876,14 @@ async fn cli_check(url: &str) {
 
 #[tokio::main]
 async fn main() {
-    // "CLI tools" role: check <url> bypasses the server entirely.
+    // "CLI tools" role: check <url> / songs bypass the server entirely.
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "check" {
         cli_check(&args[2]).await;
-    } else if args.len() > 1 && args[1] != "check" {
-        eprintln!("usage: bulker-rs [check <url>]  (no args = start the server/daemon)");
+    } else if args.len() == 2 && args[1] == "songs" {
+        cli_songs().await;
+    } else if args.len() > 1 {
+        eprintln!("usage: bulker-rs [check <url> | songs]  (no args = start the server/daemon)");
         std::process::exit(2);
     }
 
@@ -862,6 +942,7 @@ async fn main() {
         .route("/api/history", get(get_history))
         .route("/api/logs", get(get_logs))
         .route("/api/quality", get(get_quality))
+        .route("/api/songs", get(get_songs))
         .with_state(state().clone());
 
     let addr = format!("{}:{}", config().host, config().port);

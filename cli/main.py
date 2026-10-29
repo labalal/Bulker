@@ -100,6 +100,29 @@ def cmd_logs(lines: int) -> int:
     return 0
 
 
+def cmd_songs() -> int:
+    """Prints the downloaded-music catalog: what you have, at what quality,
+    and how much of your 10 GB is spent. Reads the local catalog file, so it
+    works offline (no server needed)."""
+    from core.library import read_songs
+
+    songs = read_songs()
+    if not songs:
+        print("library is empty")
+        return 0
+    total_bytes = sum(s.get("size_bytes", 0) for s in songs)
+    gib = total_bytes / 1024**3
+    print(f"{len(songs)} song(s), {gib:.2f} GiB spent of your disk budget:")
+    for s in songs:
+        quality = f"{s['delivered_kbps']:.0f} kbps" if s.get("delivered_kbps") else "n/a"
+        print(
+            f"  [{s.get('video_id') or '?'}] {s['title']} -- {s['artist']} "
+            f"({quality}, itag {s.get('itag', '?')})"
+        )
+        print(f"      {s['path']} @ {s.get('downloaded_at')}")
+    return 0
+
+
 def cmd_serve() -> int:
     # The daemon role: run the FastAPI server in-process.
     import uvicorn
@@ -127,6 +150,7 @@ def main() -> int:
     delete.add_argument("item_id")
     sub.add_parser("clear", help="remove finished items")
     sub.add_parser("cleanup", help="clean the temp workspace")
+    sub.add_parser("songs", help="list the downloaded library (works offline)")
     logs = sub.add_parser("logs", help="tail the server log")
     logs.add_argument("--lines", type=int, default=50)
     sub.add_parser("serve", help="start the server (daemon)")
@@ -150,6 +174,8 @@ def main() -> int:
         return cmd_clear()
     if args.cmd == "cleanup":
         return cmd_cleanup()
+    if args.cmd == "songs":
+        return cmd_songs()
     if args.cmd == "logs":
         return cmd_logs(args.lines)
     if args.cmd == "serve":
