@@ -478,7 +478,7 @@ pub async fn download_once(
         "aria2c".to_string(),
         "--external-downloader-args".to_string(),
         format!("aria2c:{}", aria2_args(params)),
-        "--outtmpl".to_string(),
+        "--output".to_string(),
         format!("{}/%(title)s [%(id)s].%(ext)s", cfg.temp_workspace_dir),
         "--extractor-args".to_string(),
         "youtube:player_client=android,web".to_string(),
