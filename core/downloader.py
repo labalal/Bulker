@@ -532,7 +532,7 @@ def download_audio(
 
     ydl_opts = {
         "format": config.AUDIO_FORMAT_SELECTOR,
-        "outtmpl": f"{config.TEMP_WORKSPACE_DIR}/%(title)s [%(id)s].%(ext)s",
+        "output": f"{config.TEMP_WORKSPACE_DIR}/%(title)s [%(id)s].%(ext)s",
         "cookiefile": config.COOKIES_FILE,
         "download_archive": config.ARCHIVE_FILE,
         "noplaylist": True,
