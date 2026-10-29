@@ -31,6 +31,7 @@ pub fn finalize_pipeline(
     artist: &str,
     cancel: &Arc<AtomicBool>,
     report: Reporter,
+    thumb_dim: i64,
 ) -> Result<PathBuf, String> {
     report("Extract Audio", "done", "Audio extracted (Opus)");
 
@@ -64,7 +65,7 @@ pub fn finalize_pipeline(
         let out = Command::new("ffmpeg")
             .args(["-y", "-i"])
             .arg(&thumb)
-            .args(["-vf", "scale=320:-1", "-q:v", "5"])
+            .args(["-vf", &format!("scale={}:-1", thumb_dim), "-q:v", "5"])
             .arg(&destination)
             .output();
         match out {

@@ -41,6 +41,7 @@ struct Settings {
     concurrency: usize,
     aria2_connections: i64,
     rate_limit_kibs: i64,
+    thumbnail_max_dimension: i64,
 }
 
 struct AppState {
@@ -260,6 +261,7 @@ async fn process_item(item: &Item, cancel: Arc<AtomicBool>) {
                     meta.duration,
                     meta.best_opus_kbps,
                     meta.selected_format_id.clone(),
+                    state().settings.lock().unwrap().thumbnail_max_dimension,
                 );
                 match tag::finalize_pipeline(
                     meta.opus_path,
@@ -268,6 +270,7 @@ async fn process_item(item: &Item, cancel: Arc<AtomicBool>) {
                     &meta.artist,
                     &cancel,
                     &report,
+                    library.5,
                 ) {
                     Ok(path) => {
                         info!("Completed: {} -> {}", item.title, path.display());
@@ -533,7 +536,34 @@ async fn add_to_queue(State(_): State<Arc<AppState>>, Json(req): Json<BulkURLReq
     let urls = ytdlp::parse_input_urls(&req.raw_input);
     let mut added_ids = Vec::new();
     for raw_url in urls {
-        let entries = ytdlp::list_entries(&raw_url).await;
+        let video_id = ytdlp::query_param(&raw_url, "v");
+        let list_id = ytdlp::query_param(&raw_url, "list");
+
+        let entries: Vec<ytdlp::Entry> = if video_id.is_some() && list_id.is_none() {
+            // Single video watch URL -- fetch metadata directly instead of
+            // expanding through list_entries (which can resolve to a
+            // different googlevideo.com stream link).
+            let meta = ytdlp::fetch_metadata(&raw_url).await;
+            vec![ytdlp::Entry {
+                title: meta.title,
+                url: raw_url.clone(),
+                uploader: meta.artist,
+                duration: meta.duration,
+                from_playlist: false,
+            }]
+        } else if list_id.is_some() {
+            // Playlist/radar URL -- expand into individual entries
+            ytdlp::list_entries(&raw_url).await
+        } else {
+            vec![ytdlp::Entry {
+                title: raw_url.clone(),
+                url: raw_url.clone(),
+                uploader: String::new(),
+                duration: None,
+                from_playlist: false,
+            }]
+        };
+
         let s = state();
         let mut items = s.items.lock().unwrap();
         let mut order = s.order.lock().unwrap();
@@ -592,7 +622,7 @@ async fn get_queue() -> Json<serde_json::Value> {
 /// Catalog the finished song into SQLite: what you have, at what quality.
 fn record_library(
     item: &Item,
-    library: &(String, String, Option<f64>, f64, Option<String>),
+    library: &(String, String, Option<f64>, f64, Option<String>, i64),
     final_path: &std::path::Path,
 ) {
     let size_bytes = std::fs::metadata(final_path).map(|m| m.len()).unwrap_or(0);
@@ -756,6 +786,7 @@ async fn get_settings() -> Json<serde_json::Value> {
         "max_concurrency": cfg.concurrency_max,
         "aria2_connections": settings.aria2_connections,
         "rate_limit_kibs": settings.rate_limit_kibs,
+        "thumbnail_max_dimension": settings.thumbnail_max_dimension,
         "cookies_expired": config::cookies_expired(),
         "temp_workspace_dir": cfg.temp_workspace_dir,
         "songs_archive_dir": cfg.songs_archive_dir,
@@ -769,6 +800,7 @@ struct SettingsRequest {
     concurrency: Option<usize>,
     aria2_connections: Option<i64>,
     rate_limit_kibs: Option<i64>,
+    thumbnail_max_dimension: Option<i64>,
 }
 
 async fn update_settings(Json(req): Json<SettingsRequest>) -> Json<serde_json::Value> {
@@ -787,12 +819,17 @@ async fn update_settings(Json(req): Json<SettingsRequest>) -> Json<serde_json::V
             settings.rate_limit_kibs = r.clamp(0, 1024 * 1024);
             db::save_setting(&s.db, "rate_limit_kibs", r);
         }
-        (settings.concurrency, settings.aria2_connections, settings.rate_limit_kibs)
+        if let Some(t) = req.thumbnail_max_dimension {
+            settings.thumbnail_max_dimension = t.clamp(80, 4096);
+            db::save_setting(&s.db, "thumbnail_max_dimension", t);
+        }
+        (settings.concurrency, settings.aria2_connections, settings.rate_limit_kibs, settings.thumbnail_max_dimension)
     };
     Json(json!({
         "concurrency": clamped.0,
         "aria2_connections": clamped.1,
         "rate_limit_kibs": clamped.2,
+        "thumbnail_max_dimension": clamped.3,
     }))
 }
 
@@ -904,6 +941,7 @@ async fn main() {
                     concurrency: config().concurrency_default.clamp(1, config().concurrency_max),
                     aria2_connections: config().aria2c_connections.clamp(1, 32),
                     rate_limit_kibs: config().default_rate_limit_kibs.clamp(0, 1024 * 1024),
+                    thumbnail_max_dimension: config().thumbnail_max_dimension.clamp(80, 4096),
                 }),
                 active_downloads: Mutex::new(0),
             }));

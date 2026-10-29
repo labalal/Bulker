@@ -52,6 +52,7 @@ pub struct Config {
     pub auto_retry_attempts: usize,
     pub auto_retry_backoff_seconds: u64,
     pub default_rate_limit_kibs: i64,
+    pub thumbnail_max_dimension: i64,
 }
 
 fn getenv(key: &str, default: &str) -> String {
@@ -91,6 +92,7 @@ pub fn init() {
         auto_retry_attempts: getenv_num("AUTO_RETRY_ATTEMPTS", 3),
         auto_retry_backoff_seconds: getenv_num("AUTO_RETRY_BACKOFF_SECONDS", 15),
         default_rate_limit_kibs: getenv_num("RATE_LIMIT_KIBS", 0),
+        thumbnail_max_dimension: getenv_num("THUMBNAIL_MAX_DIMENSION", 320),
     });
 }
 

@@ -93,10 +93,11 @@ class OpusTagPP(yt_dlp.postprocessor.PostProcessor):
     show a green/red status per step instead of a black box.
     """
 
-    def __init__(self, on_progress=None, cancel_event: threading.Event | None = None):
+    def __init__(self, on_progress=None, cancel_event: threading.Event | None = None, thumbnail_dim: int | None = None):
         super().__init__()
         self.on_progress = on_progress
         self.cancel_event = cancel_event
+        self.thumbnail_dim = thumbnail_dim or config.THUMBNAIL_MAX_DIMENSION
 
     def _report(self, step, state, detail):
         if self.on_progress:
@@ -143,7 +144,7 @@ class OpusTagPP(yt_dlp.postprocessor.PostProcessor):
                     "-i",
                     thumb_path,
                     "-vf",
-                    "scale=320:-1",
+                    f"scale={self.thumbnail_dim}:-1",
                     "-q:v",
                     "5",
                     compressed_thumb,
@@ -383,7 +384,22 @@ def _flatten_entry(entry: dict) -> str | None:
         return None
     if not str(entry_url).startswith("http"):
         entry_url = f"https://music.youtube.com/watch?v={entry_url}"
-    return to_music_youtube_url(str(entry_url))
+    return to_music_youtube_url(googlevideo_to_music_youtube(str(entry_url)))
+
+
+def googlevideo_to_music_youtube(url: str) -> str:
+    """yt-dlp sometimes resolves a music.youtube.com watch URL to a direct
+    googlevideo.com stream link (with the video id in the ``id`` param).
+    aria2c can't play those directly -- convert back to a watch URL so
+    yt-dlp handles the cookies/format selection itself."""
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    if "googlevideo.com" not in host:
+        return url
+    qs = parse_qs(parsed.query)
+    if "id" in qs:
+        return f"https://music.youtube.com/watch?v={qs['id'][0]}"
+    return url
 
 
 def list_entries(url: str) -> list[dict]:
@@ -394,7 +410,7 @@ def list_entries(url: str) -> list[dict]:
         "quiet": True,
         "skip_download": True,
         "cookiefile": config.COOKIES_FILE,
-        "extract_flat": "in_playlist",
+        "extract_flat": True,
         "extractor_args": {"youtube": {"player-client": ["android", "web"]}},
         "logger": YTDLPLogger(),
     }
@@ -477,6 +493,47 @@ def search_videos(query: str, limit: int = 8) -> list[dict]:
     return results
 
 
+def query_param(url: str, name: str) -> str | None:
+    """Return the value of a query parameter from a URL."""
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
+    if name in qs:
+        return qs[name][0]
+    return None
+
+
+def fetch_metadata(url: str) -> tuple[str, str]:
+    """One cheap -J lookup for a single video URL. Returns (title, artist)
+    without resolving to a different video like list_entries can. Artist
+    falls back to uploader -> 'Unknown Artist', same as OpusTagPP."""
+    music_url = to_music_youtube_url(url)
+    ydl_opts = {
+        "quiet": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "cookiefile": config.COOKIES_FILE,
+        "extractor_args": {"youtube": {"player-client": ["android", "web"]}},
+        "logger": YTDLPLogger(),
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            info = ydl.extract_info(music_url, download=False)
+        except Exception:
+            logger.exception("fetch_metadata failed for %s", url)
+            return "Unknown Title", "Unknown Artist"
+
+    if not info:
+        return "Unknown Title", "Unknown Artist"
+
+    title = info.get("title") or "Unknown Title"
+    artist = (
+        info.get("artist")
+        or info.get("uploader")
+        or "Unknown Artist"
+    )
+    return title, artist
+
+
 def get_video_title(url: str) -> str:
     """Kept for backwards compatibility; list_entries() is now used for queueing."""
     entries = list_entries(url)
@@ -491,6 +548,7 @@ def download_audio(
     cancel_event: threading.Event | None = None,
     aria2_connections: int | None = None,
     rate_limit_kibs: int | None = None,
+    thumbnail_dim: int | None = None,
 ):
     """on_progress(step: str, state: 'active'|'done'|'failed', detail: str)
     is called at every pipeline transition (Download, Extract Audio,
@@ -506,6 +564,11 @@ def download_audio(
     lossy generation loss on top, unlike transcoding to a fixed-bitrate
     MP3/AAC.
     """
+
+    # yt-dlp may resolve a music.youtube.com watch URL to a direct
+    # googlevideo.com stream link; aria2c can't play those, so convert back
+    # to a watch URL so yt-dlp handles cookies/format selection itself.
+    url = googlevideo_to_music_youtube(url)
 
     aria2_connections = aria2_connections or config.ARIA2C_CONNECTIONS
     aria2_rate_limit = (
@@ -592,5 +655,5 @@ def download_audio(
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.add_post_processor(OpusTagPP(on_progress=on_progress, cancel_event=cancel_event))
+        ydl.add_post_processor(OpusTagPP(on_progress=on_progress, cancel_event=cancel_event, thumbnail_dim=thumbnail_dim))
         ydl.download([url])
