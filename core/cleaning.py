@@ -2,7 +2,7 @@ import logging
 import re
 from pathlib import Path
 
-import config
+from core import config
 
 logger = logging.getLogger("audio_downloader")
 

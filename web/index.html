@@ -101,6 +101,16 @@
 
     <!-- QUEUE TAB -->
     <div class="tab-panel active" id="tab-queue">
+        <div id="cookieBanner" class="card" style="display:none; border-left: 4px solid #d32f2f;">
+            <div class="title-row">
+                <span style="font-size: 13px; color: #d32f2f;">
+                    ⚠️ YouTube cookies have expired — downloads may fail or be throttled.
+                    Re-export <b id="cookieFileHint">cookies.txt</b> from your browser, then retry failed items.
+                </span>
+                <button class="item-action" onclick="ackCookies()">Dismiss</button>
+            </div>
+        </div>
+
         <div class="card">
             <h3>Add to queue</h3>
             <textarea id="urlInput" placeholder="Paste a video URL, playlist link, or multiple URLs (one per line)..."></textarea>
@@ -175,6 +185,13 @@
                     <span id="aria2Value" class="settings-value">16</span>
                 </div>
             </div>
+            <div class="settings-row">
+                <div class="settings-label">Download speed limit<span class="muted">Per download, KiB/s. Lower = gentler on YouTube, less throttling</span></div>
+                <div class="row" style="align-items:center;">
+                    <input type="range" id="rateLimitRange" min="0" max="16384" step="256" value="0" oninput="onRateLimitInput(this.value)">
+                    <span id="rateLimitValue" class="settings-value">Unlimited</span>
+                </div>
+            </div>
         </div>
         <div class="card">
             <h3>Paths <span class="muted">(edit via .env, restart required)</span></h3>
@@ -190,6 +207,7 @@
         let isDragging = false;
         let concurrencyDebounce = null;
         let aria2Debounce = null;
+        let rateLimitDebounce = null;
         let logsVisible = false;
         let currentTab = 'queue';
 
@@ -303,6 +321,22 @@
             }, 300);
         }
 
+        function onRateLimitInput(value) {
+            const v = parseInt(value, 10);
+            document.getElementById('rateLimitValue').textContent = v === 0 ? 'Unlimited' : formatKiBs(v);
+            clearTimeout(rateLimitDebounce);
+            rateLimitDebounce = setTimeout(() => {
+                fetch('/api/settings', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({rate_limit_kibs: v})
+                });
+            }, 300);
+        }
+
+        function formatKiBs(kibs) {
+            return kibs >= 1024 ? (kibs / 1024).toFixed(kibs % 1024 ? 1 : 0) + ' MiB/s' : kibs + ' KiB/s';
+        }
+
         async function loadSettings() {
             const res = await fetch('/api/settings');
             const data = await res.json();
@@ -310,6 +344,9 @@
             document.getElementById('concurrencyValue').textContent = data.concurrency;
             document.getElementById('aria2Range').value = data.aria2_connections;
             document.getElementById('aria2Value').textContent = data.aria2_connections;
+            document.getElementById('rateLimitRange').value = data.rate_limit_kibs;
+            document.getElementById('rateLimitValue').textContent =
+                data.rate_limit_kibs === 0 ? 'Unlimited' : formatKiBs(data.rate_limit_kibs);
             document.getElementById('cfgTempDir').textContent = data.temp_workspace_dir;
             document.getElementById('cfgArchiveDir').textContent = data.songs_archive_dir;
             document.getElementById('cfgCookies').textContent = data.cookies_file;
@@ -491,7 +528,23 @@
             }
         }
 
+        async function checkCookies() {
+            try {
+                const res = await fetch('/api/settings');
+                const data = await res.json();
+                document.getElementById('cookieFileHint').textContent = data.cookies_file;
+                document.getElementById('cookieBanner').style.display = data.cookies_expired ? 'block' : 'none';
+            } catch (e) { /* server hiccup; try again next tick */ }
+        }
+
+        async function ackCookies() {
+            await fetch('/api/cookies/acknowledge', { method: 'POST' });
+            document.getElementById('cookieBanner').style.display = 'none';
+        }
+
         loadSettings();
+        checkCookies();
+        setInterval(checkCookies, 10000);
         setInterval(() => {
             fetchQueue();
             if (currentTab === 'archive') fetchHistory();

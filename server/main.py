@@ -12,13 +12,16 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-import config
-from cleaning import cleanup_workspace
-from downloader import (
+from core import config
+from core.cleaning import cleanup_workspace
+from core.downloader import (
     STEP_NAMES,
     DownloadCancelled,
+    acknowledge_cookies_expiry,
     cleanup_existing_mess,
+    cookies_expired,
     download_audio,
+    inspect_opus_quality,
     list_entries,
     parse_input_urls,
     search_videos,
@@ -41,7 +44,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory="web"), name="static")
 
 items: dict[str, dict] = {}
 order: list[str] = []
@@ -56,6 +59,8 @@ def fresh_steps() -> dict:
 def is_active_status(status: str, steps: dict | None = None) -> bool:
     if status in ("Starting...", "Cancelling..."):
         return True
+    if status.startswith("Retrying"):
+        return True
     if steps and any(s == "active" for s in steps.values()):
         return True
     # Fallback for status strings saved by older versions of this app.
@@ -65,6 +70,8 @@ def is_active_status(status: str, steps: dict | None = None) -> bool:
 class RuntimeSettings:
     def __init__(self):
         self.aria2_connections = config.ARIA2C_CONNECTIONS
+        # KiB/s per download; 0 = unlimited. Changeable live on Settings tab.
+        self.rate_limit_kibs = config.DEFAULT_RATE_LIMIT_KIBS
 
 
 runtime_settings = RuntimeSettings()
@@ -107,6 +114,7 @@ class ReorderRequest(BaseModel):
 class SettingsRequest(BaseModel):
     concurrency: int | None = None
     aria2_connections: int | None = None
+    rate_limit_kibs: int | None = None
 
 
 def make_item(url: str, title: str, from_playlist: bool = False) -> dict:
@@ -245,27 +253,66 @@ async def worker():
                 item["steps"][step] = state
                 item["status"] = detail
 
-            logger.info("Starting download: %s (%s)", item["title"], item["url"])
-            try:
-                await asyncio.to_thread(
-                    download_audio,
-                    item["url"],
-                    on_progress,
-                    item["cancel_event"],
-                    runtime_settings.aria2_connections,
-                )
+            final_error: Exception | None = None
+            for attempt in range(1, config.AUTO_RETRY_ATTEMPTS + 1):
                 if item["cancel_event"].is_set():
                     item["status"] = "Cancelled"
                     logger.info("Cancelled: %s", item["title"])
-                else:
-                    item["status"] = "Completed"
-                    logger.info("Completed: %s", item["title"])
-            except DownloadCancelled:
-                item["status"] = "Cancelled"
-                logger.info("Cancelled: %s", item["title"])
-            except Exception as e:  # noqa: BLE001
-                item["status"] = f"Error: {e!s}"
-                logger.error("Failed: %s -- %s", item["title"], str(e))
+                    final_error = None
+                    break
+                if attempt > 1:
+                    # Retry with a clean slate so the UI shows pending
+                    # steps again, not leftover states from the attempt
+                    # that just died.
+                    item["steps"] = fresh_steps()
+                    logger.info(
+                        "Retrying (%d/%d): %s", attempt, config.AUTO_RETRY_ATTEMPTS, item["title"]
+                    )
+                logger.info("Starting download: %s (%s)", item["title"], item["url"])
+                try:
+                    await asyncio.to_thread(
+                        download_audio,
+                        item["url"],
+                        on_progress,
+                        item["cancel_event"],
+                        runtime_settings.aria2_connections,
+                        runtime_settings.rate_limit_kibs,
+                    )
+                    if item["cancel_event"].is_set():
+                        item["status"] = "Cancelled"
+                        logger.info("Cancelled: %s", item["title"])
+                    else:
+                        item["status"] = "Completed"
+                        logger.info("Completed: %s", item["title"])
+                    final_error = None
+                    break
+                except DownloadCancelled:
+                    item["status"] = "Cancelled"
+                    logger.info("Cancelled: %s", item["title"])
+                    final_error = None
+                    break
+                except Exception as e:  # noqa: BLE001
+                    final_error = e
+                    logger.warning(
+                        "Attempt %d/%d failed for %s -- %s",
+                        attempt,
+                        config.AUTO_RETRY_ATTEMPTS,
+                        item["title"],
+                        str(e),
+                    )
+                    if "unavailable" in str(e).lower():
+                        # Video is gone/private/region-locked; retrying
+                        # can never fix this one.
+                        break
+                    if attempt < config.AUTO_RETRY_ATTEMPTS:
+                        delay = config.AUTO_RETRY_BACKOFF_SECONDS * attempt
+                        item["status"] = (
+                            f"Retrying in {delay}s (attempt {attempt + 1}/{config.AUTO_RETRY_ATTEMPTS})..."
+                        )
+                        await asyncio.sleep(delay)
+            if final_error is not None:
+                item["status"] = f"Error: {final_error!s}"
+                logger.error("Failed: %s -- %s", item["title"], str(final_error))
         finally:
             await limiter.release()
 
@@ -291,7 +338,7 @@ async def startup_event():
 
 @app.get("/")
 def read_root():
-    return FileResponse("static/index.html")
+    return FileResponse("web/index.html")
 
 
 @app.post("/api/add")
@@ -413,6 +460,8 @@ def get_settings():
         "concurrency": limiter.limit,
         "max_concurrency": config.MAX_CONCURRENCY,
         "aria2_connections": runtime_settings.aria2_connections,
+        "rate_limit_kibs": runtime_settings.rate_limit_kibs,
+        "cookies_expired": cookies_expired(),
         "temp_workspace_dir": config.TEMP_WORKSPACE_DIR,
         "songs_archive_dir": config.SONGS_ARCHIVE_DIR,
         "cookies_file": config.COOKIES_FILE,
@@ -426,7 +475,20 @@ def update_settings(req: SettingsRequest):
         limiter.limit = max(1, min(config.MAX_CONCURRENCY, req.concurrency))
     if req.aria2_connections is not None:
         runtime_settings.aria2_connections = max(1, min(32, req.aria2_connections))
-    return {"concurrency": limiter.limit, "aria2_connections": runtime_settings.aria2_connections}
+    if req.rate_limit_kibs is not None:
+        # 0 = unlimited; otherwise cap at 1 GiB/s to keep the slider sane.
+        runtime_settings.rate_limit_kibs = max(0, min(1024 * 1024, req.rate_limit_kibs))
+    return {
+        "concurrency": limiter.limit,
+        "aria2_connections": runtime_settings.aria2_connections,
+        "rate_limit_kibs": runtime_settings.rate_limit_kibs,
+    }
+
+
+@app.post("/api/cookies/acknowledge")
+def acknowledge_cookies_warning():
+    acknowledge_cookies_expiry()
+    return {"message": "Cookie warning dismissed"}
 
 
 @app.get("/api/logs")
@@ -436,3 +498,12 @@ def get_logs(lines: int = 200):
     with open(config.LOG_FILE) as f:
         content = f.readlines()
     return {"logs": "".join(content[-lines:])}
+
+
+@app.get("/api/quality")
+def get_quality(url: str):
+    """Proves whether the current cookies unlock Premium's ~256kbps Opus
+    (itag 774) for a given YouTube Music video."""
+    if not url.strip():
+        raise HTTPException(status_code=400, detail="url is required")
+    return inspect_opus_quality(url)
