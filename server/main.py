@@ -507,3 +507,19 @@ def get_quality(url: str):
     if not url.strip():
         raise HTTPException(status_code=400, detail="url is required")
     return inspect_opus_quality(url)
+
+
+@app.get("/api/songs")
+def get_songs():
+    """The downloaded-music library catalog: every finished download with
+    its quality (itag/kbps), file path and total disk used."""
+    from core.library import read_songs
+
+    songs = read_songs()
+    total_bytes = sum(s.get("size_bytes", 0) for s in songs)
+    return {
+        "songs": songs,
+        "total": len(songs),
+        "total_bytes": total_bytes,
+        "total_gib": round(total_bytes / 1024**3, 2),
+    }

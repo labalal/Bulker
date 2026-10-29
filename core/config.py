@@ -26,6 +26,10 @@ TEMP_WORKSPACE_DIR = os.getenv("TEMP_WORKSPACE_DIR", "temp_workspace")
 # Vorbis-comment tags on the .opus files rather than folder structure.
 SONGS_ARCHIVE_DIR = os.getenv("SONGS_ARCHIVE_DIR", "Songs_archive")
 
+# Per-song catalog of everything downloaded (what + quality + where).
+# JSON file for the Python app; the Rust build keeps identical data in SQLite.
+SONG_LIBRARY_FILE = os.getenv("SONG_LIBRARY_FILE", "library.json")
+
 QUEUE_STORE_PATH = os.getenv("QUEUE_STORE_PATH", "queue_store.json")
 LOG_FILE = os.getenv("LOG_FILE", "app.log")
 

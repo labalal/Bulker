@@ -12,6 +12,7 @@ from mutagen.flac import Picture
 from mutagen.oggopus import OggOpus
 
 from core import config
+from core.library import record_song
 
 logger = logging.getLogger("audio_downloader")
 
@@ -235,6 +236,29 @@ class OpusTagPP(yt_dlp.postprocessor.PostProcessor):
                     logger.warning("Could not remove leftover %s", junk_file)
 
         info["filepath"] = final_filepath
+
+        # Library catalog entry (SQLite-catalog equivalent on the Rust side).
+        video_id = ""
+        if info.get("webpage_url"):
+            video_id = (parse_qs(urlparse(str(info["webpage_url"])).query) or {}).get("v", [""])[0]
+        size_bytes = os.path.getsize(final_filepath)
+        delivered_kbps = None
+        if info.get("duration") and size_bytes:
+            delivered_kbps = size_bytes * 8 / 1000 / info["duration"]
+        try:
+            record_song(
+                title=title,
+                artist=artist,
+                video_id=video_id,
+                itag=str(info.get("format_id", "?")),
+                abr=info.get("abr"),
+                delivered_kbps=delivered_kbps,
+                size_bytes=size_bytes,
+                path=final_filepath,
+            )
+        except Exception:  # broad guard: catalog write must never kill a download
+            logger.exception("Failed to record library entry for %s", title)
+
         return [], info
 
 

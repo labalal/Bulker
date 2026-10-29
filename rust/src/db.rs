@@ -47,6 +47,18 @@ pub fn init(path: &str) -> Result<Db> {
             from_playlist INTEGER NOT NULL DEFAULT 0,
             finished_at   TEXT NOT NULL
          );
+         CREATE TABLE IF NOT EXISTS songs (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id      TEXT NOT NULL,
+            title         TEXT NOT NULL,
+            artist        TEXT NOT NULL,
+            itag          TEXT,
+            abr           REAL,
+            delivered_kbps REAL,
+            size_bytes    INTEGER NOT NULL,
+            path          TEXT NOT NULL,
+            downloaded_at TEXT NOT NULL
+         );
          CREATE TABLE IF NOT EXISTS settings (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -123,8 +135,7 @@ pub fn load_history(db: &Db) -> Result<Vec<HistoryEntry>> {
     rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
 }
 
-pub fn get_setting(db: &Db, key: &str, default: i64) -> i64 {
-    let conn = db.0.lock().unwrap();
+pub fn get_setting(db: &Db, key: &str, default: i64) -> i64 {    let conn = db.0.lock().unwrap();
     conn.query_row("SELECT value FROM settings WHERE key = ?", [key], |r| r.get::<_, String>(0))
         .ok()
         .and_then(|v| v.parse().ok())
@@ -139,4 +150,75 @@ pub fn save_setting(db: &Db, key: &str, value: i64) {
             rusqlite::params![key, value.to_string()],
         );
     }
+}
+
+// --- downloaded-music library ----------------------------------------------
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SongRow {
+    pub video_id: String,
+    pub title: String,
+    pub artist: String,
+    pub itag: Option<String>,
+    pub abr: Option<f64>,
+    pub delivered_kbps: Option<f64>,
+    pub size_bytes: i64,
+    pub path: String,
+    pub downloaded_at: String,
+}
+
+/// Catalog every completed download: what music you actually have, at what
+/// quality, where the file sits and how much of your disk budget is spent.
+pub fn insert_song(db: &Db, song: &SongRow) {
+    if let Ok(conn) = db.0.lock() {
+        let _ = conn.execute(
+            "INSERT INTO songs (video_id, title, artist, itag, abr, delivered_kbps,
+                                size_bytes, path, downloaded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                song.video_id,
+                song.title,
+                song.artist,
+                song.itag,
+                song.abr,
+                song.delivered_kbps,
+                song.size_bytes,
+                song.path,
+                song.downloaded_at
+            ],
+        );
+    }
+}
+
+pub fn list_songs(db: &Db) -> (Vec<SongRow>, i64, i64) {
+    let Ok(conn) = db.0.lock() else {
+        return (vec![], 0, 0);
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT video_id, title, artist, itag, abr, delivered_kbps, size_bytes, path, downloaded_at
+         FROM songs ORDER BY id DESC",
+    ) else {
+        return (vec![], 0, 0);
+    };
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(SongRow {
+                video_id: row.get(0)?,
+                title: row.get(1)?,
+                artist: row.get(2)?,
+                itag: row.get(3)?,
+                abr: row.get(4)?,
+                delivered_kbps: row.get(5)?,
+                size_bytes: row.get(6)?,
+                path: row.get(7)?,
+                downloaded_at: row.get(8)?,
+            })
+        })
+        .ok();
+    let all = rows
+        .map(|rows| rows.filter_map(Result::ok).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let total_bytes: i64 = all.iter().map(|s| s.size_bytes).sum();
+    let total: i64 = all.len() as i64;
+    (all, total, total_bytes)
 }
