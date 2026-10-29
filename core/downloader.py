@@ -11,9 +11,25 @@ import yt_dlp
 from mutagen.flac import Picture
 from mutagen.oggopus import OggOpus
 
-import config
+from core import config
 
 logger = logging.getLogger("audio_downloader")
+
+# Set by YTDLPLogger when yt-dlp reports the account cookies have been
+# rotated/expired. Surfaced through /api/settings so the UI can show a
+# banner instead of this only living in app.log.
+cookies_expired_flag = threading.Event()
+
+
+def cookies_expired() -> bool:
+    return cookies_expired_flag.is_set()
+
+
+def acknowledge_cookies_expiry():
+    """Called from the UI's banner-dismiss button; the user has seen the
+    warning. If yt-dlp complains again it gets set right back."""
+    cookies_expired_flag.clear()
+
 
 # The pipeline every download goes through, in order. Exposed here so
 # main.py can build the initial per-item step map without duplicating
@@ -35,6 +51,8 @@ class YTDLPLogger:
         logger.debug(msg)
 
     def warning(self, msg):
+        if "cookies are no longer valid" in msg:
+            cookies_expired_flag.set()
         logger.warning(msg)
 
     def error(self, msg):
@@ -147,6 +165,28 @@ class OpusTagPP(yt_dlp.postprocessor.PostProcessor):
 
         # --- metadata ------------------------------------------------------
         self._report("Metadata", "active", "Embedding metadata (mutagen/Opus)...")
+        # Quality receipt: bitrate that actually landed on disk, so you can
+        # verify Premium is delivering the ~256kbps Opus (itag 774) and not
+        # silently falling back to the free ~128-160kbps stream (itag 251).
+        try:
+            if info.get("duration"):
+                size_bytes = os.path.getsize(filepath)
+                delivered_kbps = size_bytes * 8 / 1000 / info["duration"]
+                logger.info(
+                    "Quality receipt: itag %s (abr %s), delivered ~%.0f kbps "
+                    "-- Premium target itag 774 = ~256kbps; free tier = 251 (128-160kbps)",
+                    info.get("format_id", "?"),
+                    info.get("abr", "?"),
+                    delivered_kbps,
+                )
+                if delivered_kbps < 200:
+                    logger.warning(
+                        "Delivered bitrate looks below %dkbps -- cookies are not "
+                        "Premium for this track (or the source is low-quality).",
+                        200,
+                    )
+        except OSError:
+            logger.warning("Could not stat %s for the quality receipt", filepath)
         try:
             audio = OggOpus(filepath)
             audio["title"] = title
@@ -239,6 +279,62 @@ def to_music_youtube_url(url: str) -> str:
     return url  # couldn't find a video/playlist id -- leave it alone
 
 
+def inspect_opus_quality(url: str) -> dict:
+    """Answers "is Premium actually unlocked?": pulls the full format list
+    for the video and reports every Opus stream YouTube offered this
+    session's cookies. With valid Premium cookies on a YouTube Music track
+    you should see one with ~256kbps (itag 774); a free session tops out
+    at ~128-160kbps (itag 251).
+    """
+    music_url = to_music_youtube_url(url)
+    ydl_opts = {
+        "quiet": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "cookiefile": config.COOKIES_FILE,
+        "extractor_args": {"youtube": {"player-client": ["android", "web"]}},
+        "logger": YTDLPLogger(),
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            info = ydl.extract_info(music_url, download=False)
+        except Exception:
+            logger.exception("inspect_opus_quality failed for %s", url)
+            return {"error": "could not fetch format list"}
+
+    if not info:
+        return {"error": "no info returned"}
+
+    opus_formats = []
+    for f in info.get("formats", []):
+        if str(f.get("acodec", "")).startswith("opus") or str(f.get("ext", "")) == "opus":
+            opus_formats.append(
+                {
+                    "itag": f.get("format_id"),
+                    "abr": f.get("abr"),
+                    "tbr": f.get("tbr"),
+                    "note": f.get("format_note", ""),
+                }
+            )
+    # PremiumOpus = any opus stream at/above ~250kbps (the Music-only 774).
+    premium_available = any(
+        (fmt["abr"] or fmt["tbr"] or 0) >= 250 for fmt in opus_formats
+    )
+    return {
+        "title": info.get("title"),
+        "opus_formats": opus_formats,
+        "premium_opus_available": premium_available,
+        "best_opus_kbps": max(
+            (fmt["abr"] or fmt["tbr"] or 0 for fmt in opus_formats), default=0
+        ),
+        "verdict": (
+            "Premium unlocked: 256kbps Opus available, downloads will use it"
+            if premium_available
+            else "NOT premium-capable: only free-tier Opus offered (or no Opus at all)"
+        ),
+    }
+
+
 def parse_input_urls(raw_input: str) -> list[str]:
     lines = raw_input.splitlines()
     urls = []
@@ -247,7 +343,13 @@ def parse_input_urls(raw_input: str) -> list[str]:
         if not cleaned:
             continue
         cleaned = re.sub(r"&(si|ab_channel|pp|feature)=[^&]+", "", cleaned)
-        urls.append(to_music_youtube_url(cleaned))
+        music_url = to_music_youtube_url(cleaned)
+        # Music-only policy: anything that isn't a YouTube(-Music) watch or
+        # playlist link is dropped, not queued as a mystery URL.
+        if not music_url.startswith("https://music.youtube.com"):
+            logger.warning("Skipping non-YouTube-Music input: %s", cleaned)
+            continue
+        urls.append(music_url)
     return urls
 
 
@@ -364,6 +466,7 @@ def download_audio(
     on_progress=None,
     cancel_event: threading.Event | None = None,
     aria2_connections: int | None = None,
+    rate_limit_kibs: int | None = None,
 ):
     """on_progress(step: str, state: 'active'|'done'|'failed', detail: str)
     is called at every pipeline transition (Download, Extract Audio,
@@ -381,6 +484,9 @@ def download_audio(
     """
 
     aria2_connections = aria2_connections or config.ARIA2C_CONNECTIONS
+    aria2_rate_limit = (
+        ["--max-overall-download-limit", f"{rate_limit_kibs}K"] if rate_limit_kibs else []
+    )
 
     def hook(d):
         if cancel_event is not None and cancel_event.is_set():
@@ -409,9 +515,33 @@ def download_audio(
         "nooverwrites": True,
         "continuedl": True,
         "writethumbnail": True,
+        # YouTube throttles (and temporarily stalls) connections all the
+        # time; these make yt-dlp ride out transient failures instead of
+        # surfacing them as fatal queue-item errors.
+        "retries": config.DOWNLOAD_RETRIES,
+        "fragment_retries": config.DOWNLOAD_RETRIES,
+        "socket_timeout": config.SOCKET_TIMEOUT,
         "external_downloader": "aria2c",
         "external_downloader_args": {
-            "aria2c": ["-x", str(aria2_connections), "-s", str(aria2_connections), "-k", "1M"]
+            "aria2c": [
+                "-x", str(aria2_connections),
+                "-s", str(aria2_connections),
+                "-k", "1M",
+                *aria2_rate_limit,
+                # Resilience against YouTube throttling (the culprit
+                # behind "aria2c exited with code 2" after ~2.5 stuck
+                # minutes): re-establish split connections with a wait
+                # between attempts, bind each connection to real
+                # timeouts, resume from the .aria2 control file, and
+                # skip the pointless pre-allocation. Without these,
+                # one throttle storm aborts the whole download.
+                "--continue=true",
+                "--max-tries=20",
+                "--retry-wait=5",
+                "--connect-timeout=10",
+                "--timeout=60",
+                "--file-allocation=none",
+            ]
         },
         "postprocessors": [
             {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},

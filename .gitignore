@@ -27,3 +27,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 pranav_has.jpeg
+
+# Rust build + local db
+target/
+queue.db
+queue.db-*

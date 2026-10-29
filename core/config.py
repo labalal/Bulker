@@ -33,6 +33,33 @@ ARIA2C_CONNECTIONS = int(os.getenv("ARIA2C_CONNECTIONS", "16"))
 DEFAULT_CONCURRENCY = int(os.getenv("DEFAULT_CONCURRENCY", "3"))
 MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "6"))
 
+# --- Download resilience -------------------------------------------------
+#
+# YouTube throttles aggressively, especially when a downloader opens many
+# parallel ranged connections at once. Without retries a single throttle
+# storm kills a queue item with "aria2c exited with code 2" (aria2c's
+# timeout/abort exit code) after minutes of apparently-stuck progress.
+# Two layers of retry protect against that:
+#
+#   * DOWNLOAD_RETRIES / SOCKET_TIMEOUT are passed to yt-dlp itself, and
+#     max-tries/retry-wait/connect-timeout go to aria2c -- so individual
+#     connections get re-established instead of aborting the download.
+#   * AUTO_RETRY_ATTEMPTS is the queue-level backstop in main.py: even if
+#     an entire download attempt still dies, the worker retries the item
+#     with increasing backoff before marking it as a permanent Error.
+DOWNLOAD_RETRIES = int(os.getenv("DOWNLOAD_RETRIES", "10"))
+SOCKET_TIMEOUT = int(os.getenv("SOCKET_TIMEOUT", "30"))
+AUTO_RETRY_ATTEMPTS = int(os.getenv("AUTO_RETRY_ATTEMPTS", "3"))
+AUTO_RETRY_BACKOFF_SECONDS = int(os.getenv("AUTO_RETRY_BACKOFF_SECONDS", "15"))
+
+# Per-download speed cap in KiB/s (0 = unlimited), changeable live from the
+# Settings tab. A modest cap makes the parallel connections look like normal
+# playback traffic to YouTube, which reduces the throttling that used to
+# show up as "aria2c exited with code 2" timeouts. Note this is implemented
+# with aria2c's own --max-overall-download-limit, because yt-dlp's native
+# `ratelimit` option is ignored when an external downloader is in use.
+DEFAULT_RATE_LIMIT_KIBS = int(os.getenv("RATE_LIMIT_KIBS", "0"))
+
 SEARCH_RESULT_LIMIT = int(os.getenv("SEARCH_RESULT_LIMIT", "8"))
 AUTO_REMOVE_DELAY_SECONDS = int(os.getenv("AUTO_REMOVE_DELAY_SECONDS", "3"))
 HISTORY_LIMIT = int(os.getenv("HISTORY_LIMIT", "200"))
