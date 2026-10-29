@@ -21,9 +21,11 @@ from core.downloader import (
     cleanup_existing_mess,
     cookies_expired,
     download_audio,
+    fetch_metadata,
     inspect_opus_quality,
     list_entries,
     parse_input_urls,
+    query_param,
     search_videos,
 )
 
@@ -72,6 +74,9 @@ class RuntimeSettings:
         self.aria2_connections = config.ARIA2C_CONNECTIONS
         # KiB/s per download; 0 = unlimited. Changeable live on Settings tab.
         self.rate_limit_kibs = config.DEFAULT_RATE_LIMIT_KIBS
+        # Embedded cover-art max width in px. Lower = less RAM on 1GB
+        # Android devices. Changeable live on Settings tab.
+        self.thumbnail_max_dimension = config.THUMBNAIL_MAX_DIMENSION
 
 
 runtime_settings = RuntimeSettings()
@@ -115,6 +120,7 @@ class SettingsRequest(BaseModel):
     concurrency: int | None = None
     aria2_connections: int | None = None
     rate_limit_kibs: int | None = None
+    thumbnail_max_dimension: int | None = None
 
 
 def make_item(url: str, title: str, from_playlist: bool = False) -> dict:
@@ -277,6 +283,7 @@ async def worker():
                         item["cancel_event"],
                         runtime_settings.aria2_connections,
                         runtime_settings.rate_limit_kibs,
+                        runtime_settings.thumbnail_max_dimension,
                     )
                     if item["cancel_event"].is_set():
                         item["status"] = "Cancelled"
@@ -347,9 +354,25 @@ async def add_to_queue(req: BulkURLRequest):
     added_ids = []
 
     for raw_url in raw_urls:
-        try:
-            entries = await asyncio.to_thread(list_entries, raw_url)
-        except Exception:  # noqa: BLE001
+        video_id = query_param(raw_url, "v")
+        list_id = query_param(raw_url, "list")
+
+        if video_id and not list_id:
+            # Single video watch URL -- fetch metadata directly instead of
+            # expanding through list_entries (which can resolve to a
+            # different googlevideo.com stream link).
+            try:
+                title, _artist = await asyncio.to_thread(fetch_metadata, raw_url)
+            except Exception:  # noqa: BLE001
+                title = raw_url
+            entries: list[dict] = [{"url": raw_url, "title": title, "from_playlist": False}]
+        elif list_id:
+            # Playlist/radar URL -- expand into individual entries
+            try:
+                entries = await asyncio.to_thread(list_entries, raw_url)
+            except Exception:  # noqa: BLE001
+                entries = [{"title": raw_url, "url": raw_url, "from_playlist": True}]
+        else:
             entries = [{"title": raw_url, "url": raw_url, "from_playlist": False}]
 
         async with queue_lock:
@@ -461,6 +484,7 @@ def get_settings():
         "max_concurrency": config.MAX_CONCURRENCY,
         "aria2_connections": runtime_settings.aria2_connections,
         "rate_limit_kibs": runtime_settings.rate_limit_kibs,
+        "thumbnail_max_dimension": runtime_settings.thumbnail_max_dimension,
         "cookies_expired": cookies_expired(),
         "temp_workspace_dir": config.TEMP_WORKSPACE_DIR,
         "songs_archive_dir": config.SONGS_ARCHIVE_DIR,
@@ -478,10 +502,13 @@ def update_settings(req: SettingsRequest):
     if req.rate_limit_kibs is not None:
         # 0 = unlimited; otherwise cap at 1 GiB/s to keep the slider sane.
         runtime_settings.rate_limit_kibs = max(0, min(1024 * 1024, req.rate_limit_kibs))
+    if req.thumbnail_max_dimension is not None:
+        runtime_settings.thumbnail_max_dimension = max(80, min(4096, req.thumbnail_max_dimension))
     return {
         "concurrency": limiter.limit,
         "aria2_connections": runtime_settings.aria2_connections,
         "rate_limit_kibs": runtime_settings.rate_limit_kibs,
+        "thumbnail_max_dimension": runtime_settings.thumbnail_max_dimension,
     }
 
 
@@ -523,3 +550,4 @@ def get_songs():
         "total_bytes": total_bytes,
         "total_gib": round(total_bytes / 1024**3, 2),
     }
+

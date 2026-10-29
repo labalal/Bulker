@@ -34,6 +34,31 @@ pub fn query_param(url: &str, name: &str) -> Option<String> {
     parse_query(qs).into_iter().find(|(k, _)| k == name).map(|(_, v)| v)
 }
 
+/// yt-dlp sometimes resolves a music.youtube.com watch URL to a direct
+/// googlevideo.com stream link (with the video id in the ``id`` param).
+/// aria2c can't play those directly -- convert back to a watch URL so
+/// yt-dlp handles the cookies/format selection itself.
+pub fn googlevideo_to_music_youtube(url: &str) -> String {
+    let (host, qs) = match url.split_once("://") {
+        Some((_, rest)) => match rest.split_once('/') {
+            Some((hp, path_qs)) => {
+                let host = hp.split(':').next().unwrap_or(hp);
+                let (path, query) = path_qs.split_once('?').unwrap_or((path_qs, ""));
+                (host, (path, query))
+            }
+            None => (rest.split(':').next().unwrap_or(rest), ("", "")),
+        },
+        None => return url.to_string(),
+    };
+    if !host.contains("googlevideo.com") {
+        return url.to_string();
+    }
+    let (_path, query) = qs;
+    parse_query(query).into_iter().find(|(k, _)| k == "id").map(|(_, v)| {
+        format!("https://music.youtube.com/watch?v={v}")
+    }).unwrap_or_else(|| url.to_string())
+}
+
 fn percent_encode(s: &str) -> String {
     let mut out = String::new();
     for byte in s.bytes() {
@@ -442,6 +467,14 @@ pub async fn download_once(
         warn!("No 256kbps Premium Opus offered for: {} (free-tier only)", meta_pass.title);
     }
     let video_id = query_param(&params.url, "v").unwrap_or_default();
+    let url_for_download = if video_id.is_empty() {
+        // yt-dlp may have handed us a googlevideo.com direct-stream link
+        // (aria2c can't play those). Rebuild a music.youtube.com watch URL.
+        googlevideo_to_music_youtube(&params.url)
+    } else {
+        params.url.clone()
+    };
+    let video_id = query_param(&url_for_download, "v").unwrap_or_default();
 
     if params.cancel.load(Ordering::Relaxed) {
         return Err("__cancelled__".to_string());
@@ -482,7 +515,7 @@ pub async fn download_once(
         format!("{}/%(title)s [%(id)s].%(ext)s", cfg.temp_workspace_dir),
         "--extractor-args".to_string(),
         "youtube:player_client=android,web".to_string(),
-        params.url.clone(),
+        url_for_download,
     ];
 
     let mut child = Command::new("yt-dlp")

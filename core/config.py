@@ -100,3 +100,9 @@ AUDIO_FORMAT_SELECTOR = os.getenv(
     "AUDIO_FORMAT_SELECTOR", "bestaudio[acodec^=opus]/bestaudio/best"
 )
 FALLBACK_TRANSCODE_BITRATE = os.getenv("FALLBACK_TRANSCODE_BITRATE", "256")  # kbps
+
+# --- Thumbnail -----------------------------------------------------------
+#
+# Compressed cover art embedded into each Opus file. Smaller = less RAM
+# used when your Android 5.1 / 1GB player loads the library.
+THUMBNAIL_MAX_DIMENSION = int(os.getenv("THUMBNAIL_MAX_DIMENSION", "320"))
