@@ -18,7 +18,9 @@ use std::sync::OnceLock;
 
 pub fn init(path: &str) {
     let file = OpenOptions::new().create(true).append(true).open(path).ok();
-    let _ = LOGGER.set(FileLogger { file: Mutex::new(file) });
+    let _ = LOGGER.set(FileLogger {
+        file: Mutex::new(file),
+    });
 }
 
 /// Days-since-epoch -> (y, m, d), Howard Hinnant's civil_from_days.
@@ -37,7 +39,9 @@ pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 fn utc_timestamp() -> String {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = now.as_secs() as i64;
     let millis = now.subsec_millis();
     let days = secs.div_euclid(86_400);

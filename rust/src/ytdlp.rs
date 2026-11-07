@@ -31,7 +31,10 @@ fn parse_query(qs: &str) -> Vec<(String, String)> {
 
 pub fn query_param(url: &str, name: &str) -> Option<String> {
     let qs = url.split_once('?')?.1.split('#').next()?;
-    parse_query(qs).into_iter().find(|(k, _)| k == name).map(|(_, v)| v)
+    parse_query(qs)
+        .into_iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v)
 }
 
 /// yt-dlp sometimes resolves a music.youtube.com watch URL to a direct
@@ -54,16 +57,20 @@ pub fn googlevideo_to_music_youtube(url: &str) -> String {
         return url.to_string();
     }
     let (_path, query) = qs;
-    parse_query(query).into_iter().find(|(k, _)| k == "id").map(|(_, v)| {
-        format!("https://music.youtube.com/watch?v={v}")
-    }).unwrap_or_else(|| url.to_string())
+    parse_query(query)
+        .into_iter()
+        .find(|(k, _)| k == "id")
+        .map(|(_, v)| format!("https://music.youtube.com/watch?v={v}"))
+        .unwrap_or_else(|| url.to_string())
 }
 
 fn percent_encode(s: &str) -> String {
     let mut out = String::new();
     for byte in s.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
             _ => out.push_str(&format!("%{byte:02X}")),
         }
     }
@@ -91,15 +98,25 @@ pub fn to_music_youtube_url(url: &str) -> String {
     if host == "music.youtube.com" {
         return url.to_string();
     }
-    if host != "www.youtube.com" && host != "youtube.com" && host != "m.youtube.com" && host != "youtu.be" {
+    if host != "www.youtube.com"
+        && host != "youtube.com"
+        && host != "m.youtube.com"
+        && host != "youtu.be"
+    {
         return url.to_string(); // not a YouTube URL at all -- leave alone
     }
 
     let qs = parse_query(query);
     let video_id = if host == "youtu.be" {
-        path.split('/').next().filter(|s| !s.is_empty()).map(str::to_string)
+        path.split('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
     } else if path.starts_with("shorts/") {
-        path.split("shorts/").nth(1).and_then(|s| s.split('/').next()).map(str::to_string)
+        path.split("shorts/")
+            .nth(1)
+            .and_then(|s| s.split('/').next())
+            .map(str::to_string)
     } else {
         qs.iter().find(|(k, _)| k == "v").map(|(_, v)| v.clone())
     };
@@ -133,7 +150,13 @@ pub fn parse_input_urls(raw: &str) -> Vec<String> {
                 let kept: Vec<String> = parse_query(qs)
                     .into_iter()
                     .filter(|(k, _)| !matches!(k.as_str(), "si" | "ab_channel" | "pp" | "feature"))
-                    .map(|(k, v)| if v.is_empty() { k.clone() } else { format!("{k}={v}") })
+                    .map(|(k, v)| {
+                        if v.is_empty() {
+                            k.clone()
+                        } else {
+                            format!("{k}={v}")
+                        }
+                    })
                     .collect();
                 if kept.is_empty() {
                     base.to_string()
@@ -155,26 +178,51 @@ pub fn parse_input_urls(raw: &str) -> Vec<String> {
 
 // --- yt-dlp JSON helpers ----------------------------------------------------
 
+fn js_runtime_args() -> Vec<String> {
+    let runtime = std::env::var("YTDLP_JS_RUNTIME").unwrap_or_else(|_| "bun".to_string());
+    vec![
+        "--no-js-runtimes".to_string(),
+        "--js-runtimes".to_string(),
+        runtime,
+        "--remote-components".to_string(),
+        "ejs:npm".to_string(),
+    ]
+}
+
 fn base_args() -> Vec<String> {
     let mut args = vec!["--quiet".to_string()];
+    args.extend(js_runtime_args());
     if std::path::Path::new(&config::config().cookies_file).exists() {
         args.push("--cookies".into());
         args.push(config::config().cookies_file.clone());
     }
     args.push("--extractor-args".into());
-    args.push("youtube:player_client=android,web".into());
+    // The Android client does not accept browser-exported cookies reliably.
+    // Keep extraction on the web client so Premium entitlements and cookies
+    // are evaluated in the same client context.
+    args.push("youtube:player_client=web".into());
     args
 }
 
 async fn run_json(args: Vec<String>) -> Result<Option<serde_json::Value>, String> {
-    let out = Command::new("yt-dlp").args(&args).output().await.map_err(|e| e.to_string())?;
+    let out = Command::new("yt-dlp")
+        .args(&args)
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    if stdout.contains("cookies are no longer valid") || stderr.contains("cookies are no longer valid") {
+    if stdout.contains("cookies are no longer valid")
+        || stderr.contains("cookies are no longer valid")
+    {
         config::set_cookies_expired();
     }
     if !out.status.success() {
-        let tail = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("yt-dlp failed");
+        let tail = stderr
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("yt-dlp failed");
         return Err(tail.trim().to_string());
     }
     Ok(serde_json::from_str::<serde_json::Value>(&stdout).ok())
@@ -206,7 +254,11 @@ fn flatten_entry(entry: &serde_json::Value) -> Option<(String, String)> {
 pub async fn list_entries(url: &str) -> Vec<Entry> {
     let music_url = to_music_youtube_url(url);
     let mut args = base_args();
-    args.extend(["--dump-single-json".into(), "--flat-playlist".into(), music_url]);
+    args.extend([
+        "--dump-single-json".into(),
+        "--flat-playlist".into(),
+        music_url,
+    ]);
     match run_json(args).await {
         Ok(Some(info)) => {
             if let Some(entries) = info.get("entries").and_then(|e| e.as_array()) {
@@ -254,7 +306,10 @@ pub async fn search_videos(query: &str, limit: usize) -> Vec<Entry> {
     if query.trim().is_empty() {
         return vec![];
     }
-    let url = format!("https://music.youtube.com/search?q={}", percent_encode(query.trim()));
+    let url = format!(
+        "https://music.youtube.com/search?q={}",
+        percent_encode(query.trim())
+    );
     let mut args = base_args();
     args.extend([
         "--dump-single-json".into(),
@@ -322,7 +377,10 @@ fn aria2_args(params: &DownloadParams) -> String {
     // an external downloader is in use.
     a.push_str(" --continue=true --max-tries=20 --retry-wait=5 --connect-timeout=10 --timeout=60 --file-allocation=none");
     if params.rate_limit_kibs > 0 {
-        a.push_str(&format!(" --max-overall-download-limit={}K", params.rate_limit_kibs));
+        a.push_str(&format!(
+            " --max-overall-download-limit={}K",
+            params.rate_limit_kibs
+        ));
     }
     a
 }
@@ -377,7 +435,11 @@ pub struct MetaPass {
 /// as the Python OpusTagPP).
 pub async fn fetch_metadata(url: &str) -> MetaPass {
     let mut args = base_args();
-    args.extend(["--dump-single-json".into(), "--no-playlist".into(), url.to_string()]);
+    args.extend([
+        "--dump-single-json".into(),
+        "--no-playlist".into(),
+        url.to_string(),
+    ]);
     let Ok(Some(info)) = run_json(args).await else {
         return MetaPass {
             title: "Unknown Title".into(),
@@ -403,26 +465,45 @@ pub async fn fetch_metadata(url: &str) -> MetaPass {
 
     // Inventory every Opus stream this cookie session was offered.
     let mut opus_rates: Vec<(String, f64)> = Vec::new();
-    for f in info.get("formats").and_then(|f| f.as_array()).into_iter().flatten() {
+    for f in info
+        .get("formats")
+        .and_then(|f| f.as_array())
+        .into_iter()
+        .flatten()
+    {
         let codec = f.get("acodec").and_then(|c| c.as_str()).unwrap_or("");
         let ext = f.get("ext").and_then(|e| e.as_str()).unwrap_or("");
         if !(codec.starts_with("opus") || ext == "opus") {
             continue;
         }
-        let itag = f.get("format_id").and_then(|i| i.as_str()).unwrap_or("?").to_string();
+        let itag = f
+            .get("format_id")
+            .and_then(|i| i.as_str())
+            .unwrap_or("?")
+            .to_string();
         let abr = f.get("abr").and_then(|a| a.as_f64());
         let tbr = f.get("tbr").and_then(|a| a.as_f64());
         opus_rates.push((itag, abr.or(tbr).unwrap_or(0.0)));
     }
     let best_opus_kbps = opus_rates.iter().map(|(_, r)| *r).fold(0.0, f64::max);
     let premium_opus_available = best_opus_kbps >= 250.0;
+    let selected_format_id = opus_rates
+        .iter()
+        .find(|(itag, _)| itag == "774")
+        .or_else(|| opus_rates.iter().max_by(|(_, a), (_, b)| a.total_cmp(b)))
+        .map(|(itag, _)| itag.clone())
+        .or_else(|| {
+            info.get("format_id")
+                .and_then(|f| f.as_str())
+                .map(str::to_string)
+        });
     MetaPass {
         title,
         artist,
         duration: info.get("duration").and_then(|d| d.as_f64()),
         premium_opus_available,
         best_opus_kbps,
-        selected_format_id: info.get("format_id").and_then(|f| f.as_str()).map(str::to_string),
+        selected_format_id,
     }
 }
 
@@ -445,7 +526,10 @@ pub async fn check_quality(url: &str) -> serde_json::Value {
 }
 
 fn look_for_cookie_warning(text: &str) {
-    if text.contains("cookies are no longer valid") {
+    if text
+        .to_ascii_lowercase()
+        .contains("cookies are no longer valid")
+    {
         config::set_cookies_expired();
     }
 }
@@ -464,7 +548,10 @@ pub async fn download_once(
     if meta_pass.premium_opus_available {
         info!("Premium 256kbps Opus available for: {}", meta_pass.title);
     } else {
-        warn!("No 256kbps Premium Opus offered for: {} (free-tier only)", meta_pass.title);
+        warn!(
+            "No 256kbps Premium Opus offered for: {} (free-tier only)",
+            meta_pass.title
+        );
     }
     let video_id = query_param(&params.url, "v").unwrap_or_default();
     let url_for_download = if video_id.is_empty() {
@@ -482,11 +569,17 @@ pub async fn download_once(
 
     // 2. The actual download.
     let cfg = config::config();
-    let args = vec![
+    let mut args = vec![
         "--newline".to_string(),
         "--no-playlist".to_string(),
         "--no-overwrites".to_string(),
         "--continue".to_string(),
+        // Prefer Premium's Music-only 256kbps Opus stream when it is offered,
+        // then fall back to the best native Opus stream available to the
+        // current cookie session. The final fallback keeps unusual videos
+        // downloadable without pretending a lower-quality source is 256kbps.
+        "--format".to_string(),
+        "bestaudio[format_id=774]/bestaudio[acodec^=opus]/bestaudio/best".to_string(),
         "--write-thumbnail".to_string(),
         "--convert-thumbnails".to_string(),
         "jpg".to_string(),
@@ -505,8 +598,6 @@ pub async fn download_once(
         cfg.socket_timeout.to_string(),
         "--download-archive".to_string(),
         cfg.archive_file.clone(),
-        "--cookies".to_string(),
-        cfg.cookies_file.clone(),
         "--external-downloader".to_string(),
         "aria2c".to_string(),
         "--external-downloader-args".to_string(),
@@ -514,9 +605,13 @@ pub async fn download_once(
         "--output".to_string(),
         format!("{}/%(title)s [%(id)s].%(ext)s", cfg.temp_workspace_dir),
         "--extractor-args".to_string(),
-        "youtube:player_client=android,web".to_string(),
-        url_for_download,
+        "youtube:player_client=web".to_string(),
     ];
+    args.splice(0..0, js_runtime_args());
+    if std::path::Path::new(&cfg.cookies_file).exists() {
+        args.splice(3..3, ["--cookies".to_string(), cfg.cookies_file.clone()]);
+    }
+    args.push(url_for_download);
 
     let mut child = Command::new("yt-dlp")
         .args(&args)
@@ -589,8 +684,12 @@ pub async fn download_once(
     if video_id.is_empty() {
         return Err("Could not determine video id from URL".to_string());
     }
-    let (opus_path, thumb_path) = crate::ytdlp::locate_outputs(&video_id)
-        .ok_or_else(|| format!("No .opus output found in {} for id {video_id}", cfg.temp_workspace_dir))?;
+    let (opus_path, thumb_path) = crate::ytdlp::locate_outputs(&video_id).ok_or_else(|| {
+        format!(
+            "No .opus output found in {} for id {video_id}",
+            cfg.temp_workspace_dir
+        )
+    })?;
 
     // Quality receipt: delivered bitrate from size + duration, so Premium
     // (itag 774, ~256kbps) vs the free tier (itag 251, 128-160kbps) is
@@ -603,8 +702,7 @@ pub async fn download_once(
         info!(
             "Quality receipt for {}: itag {:?}, delivered ~{kbps:.0} kbps \
              (Premium target ~256kbps; free tier 128-160kbps)",
-            meta_pass.title,
-            meta_pass.selected_format_id,
+            meta_pass.title, meta_pass.selected_format_id,
         );
         if kbps < 200.0 {
             warn!("Delivered bitrate below 200kbps -- cookies may not be Premium for this track.");

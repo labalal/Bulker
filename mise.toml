@@ -1,3 +1,39 @@
 [tools]
-deno = "latest"
-python = "3.14"
+bun = "1.3.14"
+rust = "stable"
+rust-analyzer = "latest"
+
+[env]
+YTDLP_JS_RUNTIME = "bun"
+
+[tasks.server]
+description = "Start the Rust server"
+run = "cargo run --manifest-path rust/Cargo.toml"
+
+[tasks.build]
+description = "Build the Rust server in release mode"
+run = "cargo build --manifest-path rust/Cargo.toml --release"
+
+[tasks.check]
+description = "Type-check the Rust project"
+run = "cargo check --manifest-path rust/Cargo.toml"
+
+[tasks.inspect]
+description = "Check a YouTube Music URL"
+run = "cargo run --manifest-path rust/Cargo.toml -- check"
+
+[tasks.lint]
+description = "Lint the Rust project"
+run = "cargo clippy --manifest-path rust/Cargo.toml --all-targets --all-features"
+
+[tasks.test]
+description = "Run Rust tests"
+run = "cargo test --manifest-path rust/Cargo.toml"
+
+[tasks.fmt]
+description = "Format Rust sources"
+run = "cargo fmt --manifest-path rust/Cargo.toml"
+
+[tasks.quality]
+description = "Format, type-check, lint, and test Rust"
+depends = ["fmt", "check", "lint", "test"]

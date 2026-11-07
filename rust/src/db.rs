@@ -70,7 +70,8 @@ pub fn init(path: &str) -> Result<Db> {
 
 pub fn load_items(db: &Db) -> Result<Vec<Item>> {
     let conn = db.0.lock().unwrap();
-    let mut stmt = conn.prepare("SELECT id, url, title, from_playlist, status FROM items ORDER BY pos")?;
+    let mut stmt =
+        conn.prepare("SELECT id, url, title, from_playlist, status FROM items ORDER BY pos")?;
     let rows = stmt.query_map([], |row| {
         Ok(Item {
             id: row.get(0)?,
@@ -80,7 +81,8 @@ pub fn load_items(db: &Db) -> Result<Vec<Item>> {
             status: row.get(4)?,
         })
     })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 /// Write-through snapshot of the whole queue (same shape the Python version
@@ -105,7 +107,12 @@ pub fn insert_history(db: &Db, entry: &HistoryEntry, limit: usize) -> Result<()>
     let conn = db.0.lock().unwrap();
     conn.execute(
         "INSERT INTO history (title, status, from_playlist, finished_at) VALUES (?, ?, ?, ?)",
-        rusqlite::params![entry.title, entry.status, entry.from_playlist as i64, entry.finished_at],
+        rusqlite::params![
+            entry.title,
+            entry.status,
+            entry.from_playlist as i64,
+            entry.finished_at
+        ],
     )?;
     // Rowid-based trim (the Python version trimmed the in-memory Vec).
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM history", [], |r| r.get(0))?;
@@ -120,9 +127,8 @@ pub fn insert_history(db: &Db, entry: &HistoryEntry, limit: usize) -> Result<()>
 
 pub fn load_history(db: &Db) -> Result<Vec<HistoryEntry>> {
     let conn = db.0.lock().unwrap();
-    let mut stmt = conn.prepare(
-        "SELECT id, title, status, from_playlist, finished_at FROM history ORDER BY id",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT id, title, status, from_playlist, finished_at FROM history ORDER BY id")?;
     let rows = stmt.query_map([], |row| {
         Ok(HistoryEntry {
             id: row.get::<_, i64>(0)?.to_string(),
@@ -132,14 +138,18 @@ pub fn load_history(db: &Db) -> Result<Vec<HistoryEntry>> {
             finished_at: row.get(4)?,
         })
     })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
-pub fn get_setting(db: &Db, key: &str, default: i64) -> i64 {    let conn = db.0.lock().unwrap();
-    conn.query_row("SELECT value FROM settings WHERE key = ?", [key], |r| r.get::<_, String>(0))
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+pub fn get_setting(db: &Db, key: &str, default: i64) -> i64 {
+    let conn = db.0.lock().unwrap();
+    conn.query_row("SELECT value FROM settings WHERE key = ?", [key], |r| {
+        r.get::<_, String>(0)
+    })
+    .ok()
+    .and_then(|v| v.parse().ok())
+    .unwrap_or(default)
 }
 
 pub fn save_setting(db: &Db, key: &str, value: i64) {
