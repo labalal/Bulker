@@ -32,7 +32,7 @@ use tokio::sync::mpsc;
 use crate::config::config;
 use crate::db::{Db, HistoryEntry, Item};
 
-const INDEX_HTML: &str = include_str!("../../web/index.html");
+const HTML_SRC: &str = include_str!("../../web/index.html");
 
 pub static STEPS: [&str; 5] = [
     "Download",
@@ -579,7 +579,7 @@ fn load_state() {
 // --- HTTP handlers -----------------------------------------------------------
 
 async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+    Html(HTML_SRC)
 }
 
 #[derive(Deserialize)]
