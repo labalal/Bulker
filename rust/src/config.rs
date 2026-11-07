@@ -35,7 +35,7 @@ fn load_dotenv(path: &str) {
 pub struct Config {
     pub cookies_file: String,
     pub archive_file: String,
-    pub download_dir: String, // legacy; rescued into songs_archive at startup
+    // legacy; rescued into songs_archive at startup
     pub temp_workspace_dir: String,
     pub songs_archive_dir: String,
     pub queue_db_path: String,
@@ -68,7 +68,7 @@ fn getenv_num<T: std::str::FromStr>(key: &str, default: T) -> T {
 }
 
 fn get_base_dir() -> PathBuf {
-    if let Ok(base) = std::env::var("BULKER_BASE") {
+    if let Ok(base) = std::env::var("BULKER_BASE_PATH") {
         if !base.trim().is_empty() {
             return PathBuf::from(base);
         }
@@ -108,7 +108,7 @@ pub fn init() {
 
     let cookies_file = resolve_path("COOKIES_FILE", "cookies.txt", &base);
     let archive_file = resolve_path("ARCHIVE_FILE", "archive.txt", &base);
-    let download_dir = resolve_path("DOWNLOAD_DIR", "downloads", &base);
+    
     let temp_workspace_dir = resolve_path("TEMP_WORKSPACE_DIR", "temp_workspace", &base);
     let songs_archive_dir = resolve_path("SONGS_ARCHIVE_DIR", "Songs_archive", &base);
     let queue_db_path = resolve_path("QUEUE_DB_PATH", "queue.db", &base);
@@ -117,7 +117,7 @@ pub fn init() {
     let _ = CONFIG.set(Config {
         cookies_file,
         archive_file,
-        download_dir,
+        
         temp_workspace_dir,
         songs_archive_dir,
         queue_db_path,
