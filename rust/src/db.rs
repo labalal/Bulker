@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use rusqlite::Connection;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::sync::Mutex;
 
 /// Thin storage layer backed by plain SQLite (replaces the Python app's
@@ -87,7 +87,7 @@ pub fn load_items(db: &Db) -> Result<Vec<Item>> {
 
 /// Write-through snapshot of the whole queue (same shape the Python version
 /// wrote to queue_store.json, just atomic inside SQLite instead).
-pub fn persist_items(db: &Db, order: &[String], items: &HashMap<String, Item>) -> Result<()> {
+pub fn persist_items(db: &Db, order: &[String], items: &FxHashMap<String, Item>) -> Result<()> {
     let mut conn = db.0.lock().unwrap();
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM items", [])?;

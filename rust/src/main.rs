@@ -23,15 +23,19 @@ use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
+use mimalloc::MiMalloc;
+
 
 use crate::config::config;
 use crate::db::{Db, HistoryEntry, Item};
-
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 const HTML_SRC: &str = include_str!("../../web/index.html");
 
 pub static STEPS: [&str; 5] = [
@@ -52,11 +56,11 @@ struct Settings {
 
 struct AppState {
     db: Db,
-    items: Mutex<HashMap<String, Item>>,
+    items: Mutex<FxHashMap<String, Item>>,
     order: Mutex<Vec<String>>,
     history: Mutex<Vec<HistoryEntry>>,
-    steps: Mutex<HashMap<String, Steps>>,
-    cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    steps: Mutex<FxHashMap<String, Steps>>,
+    cancel_flags: Mutex<FxHashMap<String, Arc<AtomicBool>>>,
     settings: Mutex<Settings>,
     active_downloads: Mutex<usize>,
 }
@@ -486,8 +490,8 @@ fn cleanup_workspace() -> usize {
         }
         name.split('.').next().unwrap_or(name).to_string()
     }
-    fn identifiers(dir: &str) -> std::collections::HashSet<String> {
-        let mut ids = std::collections::HashSet::new();
+    fn identifiers(dir: &str) -> FxHashSet<String> {
+        let mut ids = FxHashSet::default();
         let Ok(root) = std::fs::canonicalize(dir) else {
             return ids;
         };
@@ -510,7 +514,7 @@ fn cleanup_workspace() -> usize {
     let cfg = config();
     let saved = identifiers(&cfg.songs_archive_dir)
         .into_iter()
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<FxHashSet<_>>();
     let mut removed = 0;
     if let Ok(rd) = std::fs::read_dir(&cfg.temp_workspace_dir) {
         for entry in rd.flatten() {
@@ -918,7 +922,7 @@ async fn acknowledge_cookies_warning() -> Json<serde_json::Value> {
     Json(json!({"message": "Cookie warning dismissed"}))
 }
 
-async fn get_logs(Query(q): Query<HashMap<String, String>>) -> Json<serde_json::Value> {
+async fn get_logs(Query(q): Query<FxHashMap<String, String>>) -> Json<serde_json::Value> {
     let lines = q
         .get("lines")
         .and_then(|v| v.parse::<usize>().ok())
@@ -1021,11 +1025,11 @@ async fn main() {
         Ok(db) => {
             let _ = STATE.set(Arc::new(AppState {
                 db,
-                items: Mutex::new(HashMap::new()),
+                items: Mutex::new(FxHashMap::default()),
                 order: Mutex::new(Vec::new()),
                 history: Mutex::new(Vec::new()),
-                steps: Mutex::new(HashMap::new()),
-                cancel_flags: Mutex::new(HashMap::new()),
+                steps: Mutex::new(FxHashMap::default()),
+                cancel_flags: Mutex::new(FxHashMap::default()),
                 settings: Mutex::new(Settings {
                     concurrency: config()
                         .concurrency_default
