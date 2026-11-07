@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
@@ -60,7 +61,32 @@ fn getenv(key: &str, default: &str) -> String {
 }
 
 fn getenv_num<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn get_base_dir() -> PathBuf {
+    if let Ok(base) = std::env::var("BULKER_BASE") {
+        if !base.trim().is_empty() {
+            return PathBuf::from(base);
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join("Projects").join("Bulker");
+    }
+    PathBuf::from(".")
+}
+
+fn resolve_path(key: &str, default: &str, base: &Path) -> String {
+    let value = getenv(key, default);
+    let path = Path::new(&value);
+    if path.is_absolute() {
+        value
+    } else {
+        base.join(path).to_string_lossy().into_owned()
+    }
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -70,15 +96,32 @@ pub fn config() -> &'static Config {
 }
 
 pub fn init() {
-    load_dotenv(".env");
+    let base = get_base_dir();
+    let dotenv_path = base.join(".env");
+    load_dotenv(&dotenv_path.to_string_lossy());
+    if let Err(e) = std::fs::create_dir_all(&base) {
+        eprintln!(
+            "warning: could not create Bulker base directory {}: {e}",
+            base.display()
+        );
+    }
+
+    let cookies_file = resolve_path("COOKIES_FILE", "cookies.txt", &base);
+    let archive_file = resolve_path("ARCHIVE_FILE", "archive.txt", &base);
+    let download_dir = resolve_path("DOWNLOAD_DIR", "downloads", &base);
+    let temp_workspace_dir = resolve_path("TEMP_WORKSPACE_DIR", "temp_workspace", &base);
+    let songs_archive_dir = resolve_path("SONGS_ARCHIVE_DIR", "Songs_archive", &base);
+    let queue_db_path = resolve_path("QUEUE_DB_PATH", "queue.db", &base);
+    let log_file = resolve_path("LOG_FILE", "app.log", &base);
+
     let _ = CONFIG.set(Config {
-        cookies_file: getenv("COOKIES_FILE", "cookies.txt"),
-        archive_file: getenv("ARCHIVE_FILE", "archive.txt"),
-        download_dir: getenv("DOWNLOAD_DIR", "downloads"),
-        temp_workspace_dir: getenv("TEMP_WORKSPACE_DIR", "temp_workspace"),
-        songs_archive_dir: getenv("SONGS_ARCHIVE_DIR", "Songs_archive"),
-        queue_db_path: getenv("QUEUE_DB_PATH", "queue.db"),
-        log_file: getenv("LOG_FILE", "app.log"),
+        cookies_file,
+        archive_file,
+        download_dir,
+        temp_workspace_dir,
+        songs_archive_dir,
+        queue_db_path,
+        log_file,
         host: getenv("HOST", "127.0.0.1"),
         port: getenv_num("PORT", 8000),
         aria2c_connections: getenv_num("ARIA2C_CONNECTIONS", 16),

@@ -1,53 +1,56 @@
 # Bulker
 
-YouTube **Music** bulk audio downloader. Two interchangeable implementations
-that share the same web UI and philosophy (best native Opus, lossless
-stream-copy, no re-encoding):
-
-- **Python**: FastAPI + yt-dlp Python API + mutagen + SQLite-free JSON store
-- **Rust** (`rust/`): single-binary axum + SQLite + lofty (smaller, faster,
-  no runtime)
-
-Both download through the `yt-dlp` + `aria2c` + `ffmpeg` pipeline with the
-same retry-hardened settings, and both are only YouTube-Music-facing:
-quality is decided by the surface (playlists, singles, YouTube-Music search),
-see `core/downloader.py` / `rust/src/ytdlp.rs`.
+YouTube **Music** bulk audio downloader using the Rust implementation and a
+shared web UI. It downloads native Opus through the
+`yt-dlp` + `aria2c` + `ffmpeg` pipeline with retry-hardened settings.
+Quality is decided by the YouTube Music surface (playlists, singles, and
+YouTube Music search); see `rust/src/ytdlp.rs`.
 
 ## Structure
 
 ```
-core/     shared engine (Python): config, downloader pipeline, cleaning
-server/   the FastAPI app -- run me (uvicorn server.main:app)
-web/      the web UI (shared by both implementations; rust embeds it)
-cli/      command-line client tools + `serve` daemon mode (Python)
-rust/     the Rust implementation (server + daemon + `check` CLI)
+web/      the web UI embedded by the Rust server
+rust/     the Rust server, daemon, SQLite database, and CLI
 ```
 
-## Setup (Python)
+## Setup
 
 ```bash
-mise install          # python + uv
-uv sync               # .venv
-sudo pacman -S ffmpeg aria2 atomicparsley   # or apt equivalent
+mise install          # Rust + rust-analyzer
+sudo pacman -S ffmpeg aria2                # or apt equivalent
 ```
 
-Run:
+The application runtime is Rust/Axum. Bun 1.3.14 is installed locally through mise
+and is used by yt-dlp for YouTube JavaScript challenge solving. Node.js is
+not required by this project.
+
+Run the Rust server:
 
 ```bash
-uv run python -m cli serve            # daemon mode: http://127.0.0.1:8000
-# or: uv run uvicorn server.main:app --reload
+mise run server                         # http://127.0.0.1:8000
 ```
 
-## Setup (Rust)
+Build a release binary:
 
 ```bash
-cd rust && cargo build --release       # -> rust/target/release/bulker-rs
+mise run build
 ```
 
-Run (from the repo root so config paths + cookies.txt line up):
+Rust development commands:
+
 ```bash
-cd .. && ./rust/target/release/bulker-rs          # same UI at 127.0.0.1:8000
+mise run check       # type-check
+mise run lint        # clippy
+mise run test        # tests
+mise run quality     # format, check, lint, and test
 ```
+
+Relative runtime paths default to `$HOME/Bulker`, regardless of the shell's
+current directory. Set `BULKER_BASE` when a different base directory is
+needed.
+
+Individual path variables such as `QUEUE_DB_PATH` and `LOG_FILE` may also be
+absolute; relative values are resolved under the base directory.
 
 ## Verify Premium actually delivers 256kbps Opus
 
@@ -55,9 +58,8 @@ Premium cookies unlock the ~256kbps Opus itag (774) on YouTube Music tracks;
 free tietops out around 128-160kbps (itag 251). To *prove* it:
 
 ```bash
-uv run python -m cli check <music.youtube.com URL>    # Python
-./rust/target/release/bulker-rs check <url>           # Rust (no server needed)
-curl '127.0.0.1:8000/api/quality?url=<url>'           # while the server runs
+mise run inspect -- <music.youtube.com URL>           # no server needed
+curl '127.0.0.1:8000/api/quality?url=<url>'          # while the server runs
 ```
 
 `premium_opus_available: true` means downloads will use the Premium stream.
@@ -72,20 +74,15 @@ a track at a different quality appends a new row, so you can see quality
 changes over time:
 
 ```bash
-uv run python -m cli songs        # Python (reads library.json, works offline)
-./rust/target/release/bulker-rs songs   # Rust (reads queue.db SQLite)
+./rust/target/release/bulker-rs songs   # reads queue.db SQLite
 curl '127.0.0.1:8000/api/songs'            # JSON from a running server
 ```
-
-Python keeps `library.json`; the Rust build stores identical data in SQLite
-(`queue.db`, table `songs`).
 
 ## CLI
 
 ```bash
-uv run python -m cli --help
-uv run python -m cli add <url>...   status   retry <id>   delete <id>
-uv run python -m cli clear          cleanup  songs   logs
+mise run inspect -- <music.youtube.com URL>
+./rust/target/release/bulker-rs songs
 ```
 
 ## Cookies

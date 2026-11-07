@@ -34,7 +34,13 @@ use crate::db::{Db, HistoryEntry, Item};
 
 const INDEX_HTML: &str = include_str!("../../web/index.html");
 
-pub static STEPS: [&str; 5] = ["Download", "Extract Audio", "Thumbnail", "Metadata", "Archive"];
+pub static STEPS: [&str; 5] = [
+    "Download",
+    "Extract Audio",
+    "Thumbnail",
+    "Metadata",
+    "Archive",
+];
 type Steps = Vec<(String, String)>;
 
 struct Settings {
@@ -61,7 +67,10 @@ fn state() -> &'static Arc<AppState> {
 }
 
 fn fresh_steps() -> Steps {
-    STEPS.iter().map(|name| (name.to_string(), "pending".to_string())).collect()
+    STEPS
+        .iter()
+        .map(|name| (name.to_string(), "pending".to_string()))
+        .collect()
 }
 
 fn steps_map(steps: &Steps) -> BTreeMap<String, String> {
@@ -83,12 +92,19 @@ fn is_active_status(status: &str, steps: &Steps) -> bool {
 }
 
 fn iso_now() -> String {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = now.as_secs() as i64;
     let days = secs.div_euclid(86_400);
     let (y, m, d) = log::civil_from_days(days);
     let t = secs.rem_euclid(86_400);
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}", t / 3600, (t % 3600) / 60, t % 60)
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}",
+        t / 3600,
+        (t % 3600) / 60,
+        t % 60
+    )
 }
 
 fn new_item(url: String, title: String, from_playlist: bool) -> Item {
@@ -214,7 +230,10 @@ async fn process_item(item: &Item, cancel: Arc<AtomicBool>) {
                     *map = fresh_steps();
                 }
             }
-            info!("Retrying ({attempt}/{}): {}", cfg.auto_retry_attempts, item.title);
+            info!(
+                "Retrying ({attempt}/{}): {}",
+                cfg.auto_retry_attempts, item.title
+            );
         }
         info!("Starting download: {} ({})", item.title, item.url);
 
@@ -227,7 +246,12 @@ async fn process_item(item: &Item, cancel: Arc<AtomicBool>) {
             async move {
                 while let Some(msg) = rx.recv().await {
                     if let Some(("pct", pct)) = msg.split_once('|') {
-                        set_step(&item, "Download", "active", &format!("Downloading... {pct}%"));
+                        set_step(
+                            &item,
+                            "Download",
+                            "active",
+                            &format!("Downloading... {pct}%"),
+                        );
                     }
                 }
             }
@@ -248,7 +272,12 @@ async fn process_item(item: &Item, cancel: Arc<AtomicBool>) {
         match result {
             Ok(meta) => {
                 set_step(item, "Download", "done", "Download complete");
-                set_step(item, "Extract Audio", "active", "Extracting audio (Opus)...");
+                set_step(
+                    item,
+                    "Extract Audio",
+                    "active",
+                    "Extracting audio (Opus)...",
+                );
                 let report = |step: &str, state_str: &str, detail: &str| {
                     set_step(item, step, state_str, detail);
                 };
@@ -303,7 +332,10 @@ async fn process_item(item: &Item, cancel: Arc<AtomicBool>) {
                 break;
             }
             Err(e) => {
-                warn!("Attempt {attempt}/{} failed for {} -- {e}", cfg.auto_retry_attempts, item.title);
+                warn!(
+                    "Attempt {attempt}/{} failed for {} -- {e}",
+                    cfg.auto_retry_attempts, item.title
+                );
                 final_error = Some(e.clone());
                 if e.to_lowercase().contains("unavailable") {
                     // Retrying can never fix a gone/private/region-locked video.
@@ -313,7 +345,11 @@ async fn process_item(item: &Item, cancel: Arc<AtomicBool>) {
                     let delay = cfg.auto_retry_backoff_seconds * attempt as u64;
                     set_status(
                         item,
-                        &format!("Retrying in {delay}s (attempt {}/{})", attempt + 1, cfg.auto_retry_attempts),
+                        &format!(
+                            "Retrying in {delay}s (attempt {}/{})",
+                            attempt + 1,
+                            cfg.auto_retry_attempts
+                        ),
                     );
                     tokio::time::sleep(Duration::from_secs(delay)).await;
                 }
@@ -350,7 +386,10 @@ async fn worker() {
         };
         let cancel = {
             let flags = state().cancel_flags.lock().unwrap();
-            flags.get(&item.id).cloned().unwrap_or_else(|| Arc::new(AtomicBool::new(false)))
+            flags
+                .get(&item.id)
+                .cloned()
+                .unwrap_or_else(|| Arc::new(AtomicBool::new(false)))
         };
 
         if cancel.load(Ordering::Relaxed) {
@@ -401,10 +440,14 @@ fn cleanup_existing_mess() {
     for dir in [&cfg.songs_archive_dir, &cfg.temp_workspace_dir] {
         let _ = std::fs::create_dir_all(dir);
     }
-    let Ok(root) = std::fs::canonicalize(&cfg.download_dir) else { return };
+    let Ok(root) = std::fs::canonicalize(&cfg.download_dir) else {
+        return;
+    };
     let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in rd.flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -414,7 +457,10 @@ fn cleanup_existing_mess() {
             match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
                 "opus" | "m4a" => {
                     if let Some(name) = path.file_name() {
-                        if let Err(e) = std::fs::rename(&path, std::env::current_dir().unwrap().join(&cfg.songs_archive_dir).join(name)) {
+                        if let Err(e) = std::fs::rename(
+                            &path,
+                            std::path::Path::new(&cfg.songs_archive_dir).join(name),
+                        ) {
                             error!("Could not rescue {}: {e}", path.display());
                         }
                     }
@@ -442,10 +488,14 @@ fn cleanup_workspace() -> usize {
     }
     fn identifiers(dir: &str) -> std::collections::HashSet<String> {
         let mut ids = std::collections::HashSet::new();
-        let Ok(root) = std::fs::canonicalize(dir) else { return ids };
+        let Ok(root) = std::fs::canonicalize(dir) else {
+            return ids;
+        };
         let mut stack = vec![root];
         while let Some(d) = stack.pop() {
-            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            let Ok(rd) = std::fs::read_dir(&d) else {
+                continue;
+            };
             for entry in rd.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
@@ -469,7 +519,11 @@ fn cleanup_workspace() -> usize {
             if !path.is_file() {
                 continue;
             }
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
             if saved.contains(&identifier(&name)) {
                 let _ = std::fs::remove_file(&path);
                 info!("cleanup_workspace: removed {name}");
@@ -477,7 +531,10 @@ fn cleanup_workspace() -> usize {
             }
         }
     }
-    info!("cleanup_workspace: removed {removed} processed file(s) from {}", cfg.temp_workspace_dir);
+    info!(
+        "cleanup_workspace: removed {removed} processed file(s) from {}",
+        cfg.temp_workspace_dir
+    );
     removed
 }
 
@@ -494,10 +551,7 @@ fn load_state() {
                     item.status.clone()
                 };
                 let id = item.id.clone();
-                items_map.insert(
-                    id.clone(),
-                    Item { status, ..item },
-                );
+                items_map.insert(id.clone(), Item { status, ..item });
                 order.push(id);
             }
             info!("Loaded {} queued item(s) from SQLite", items_map.len());
@@ -512,7 +566,8 @@ fn load_state() {
     }
     // Restore runtime settings (concurrency, aria2, rate limit) so they
     // survive restarts -- something queue_store.json also did for nothing.
-    let db_conc = db::get_setting(&s.db, "concurrency", config().concurrency_default as i64) as usize;
+    let db_conc =
+        db::get_setting(&s.db, "concurrency", config().concurrency_default as i64) as usize;
     let db_aria2 = db::get_setting(&s.db, "aria2_connections", config().aria2c_connections);
     let db_rate = db::get_setting(&s.db, "rate_limit_kibs", config().default_rate_limit_kibs);
     let mut settings = s.settings.lock().unwrap();
@@ -532,7 +587,10 @@ struct BulkURLRequest {
     raw_input: String,
 }
 
-async fn add_to_queue(State(_): State<Arc<AppState>>, Json(req): Json<BulkURLRequest>) -> Json<serde_json::Value> {
+async fn add_to_queue(
+    State(_): State<Arc<AppState>>,
+    Json(req): Json<BulkURLRequest>,
+) -> Json<serde_json::Value> {
     let urls = ytdlp::parse_input_urls(&req.raw_input);
     let mut added_ids = Vec::new();
     for raw_url in urls {
@@ -635,7 +693,11 @@ fn record_library(
         title: library.0.clone(),
         artist: library.1.clone(),
         itag: library.4.clone(),
-        abr: if library.3 > 0.0 { Some(library.3) } else { None },
+        abr: if library.3 > 0.0 {
+            Some(library.3)
+        } else {
+            None
+        },
         delivered_kbps,
         size_bytes: size_bytes as i64,
         path: final_path.display().to_string(),
@@ -644,7 +706,8 @@ fn record_library(
     db::insert_song(&state().db, &song);
 }
 
-async fn get_history() -> Json<serde_json::Value> {    let last50: Vec<HistoryEntry> = state()
+async fn get_history() -> Json<serde_json::Value> {
+    let last50: Vec<HistoryEntry> = state()
         .history
         .lock()
         .unwrap()
@@ -666,7 +729,11 @@ async fn reorder_queue(Json(req): Json<ReorderRequest>) -> Json<serde_json::Valu
     {
         let items = s.items.lock().unwrap();
         let mut order = s.order.lock().unwrap();
-        let mut new_order: Vec<String> = req.ids.into_iter().filter(|id| items.contains_key(id)).collect();
+        let mut new_order: Vec<String> = req
+            .ids
+            .into_iter()
+            .filter(|id| items.contains_key(id))
+            .collect();
         for id in order.iter() {
             if !new_order.contains(id) {
                 new_order.push(id.clone());
@@ -718,12 +785,17 @@ fn set_status_snapshot(item_id: &str, status: &str) {
     }
 }
 
-async fn retry_item(Path(item_id): Path<String>) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+async fn retry_item(
+    Path(item_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let s = state();
     {
         let mut items = s.items.lock().unwrap();
         let Some(item) = items.get_mut(&item_id) else {
-            return Err((StatusCode::NOT_FOUND, Json(json!({"detail": "Item not found"}))));
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(json!({"detail": "Item not found"})),
+            ));
         };
         if !(item.status.starts_with("Error") || item.status == "Cancelled") {
             return Err((
@@ -751,11 +823,13 @@ async fn clear_finished() -> Json<serde_json::Value> {
         let mut order = s.order.lock().unwrap();
         let to_remove: Vec<String> = order
             .iter()
-            .filter(|id| {
-                match items.get(*id) {
-                    Some(it) => it.status == "Completed" || it.status == "Cancelled" || it.status.starts_with("Error"),
-                    None => false,
+            .filter(|id| match items.get(*id) {
+                Some(it) => {
+                    it.status == "Completed"
+                        || it.status == "Cancelled"
+                        || it.status.starts_with("Error")
                 }
+                None => false,
             })
             .cloned()
             .collect();
@@ -772,7 +846,9 @@ async fn clear_finished() -> Json<serde_json::Value> {
 }
 
 async fn run_cleanup() -> Json<serde_json::Value> {
-    let removed = tokio::task::spawn_blocking(cleanup_workspace).await.unwrap_or(0);
+    let removed = tokio::task::spawn_blocking(cleanup_workspace)
+        .await
+        .unwrap_or(0);
     info!("Manual cleanup run via API: removed {removed} file(s)");
     Json(json!({"removed": removed}))
 }
@@ -823,7 +899,12 @@ async fn update_settings(Json(req): Json<SettingsRequest>) -> Json<serde_json::V
             settings.thumbnail_max_dimension = t.clamp(80, 4096);
             db::save_setting(&s.db, "thumbnail_max_dimension", t);
         }
-        (settings.concurrency, settings.aria2_connections, settings.rate_limit_kibs, settings.thumbnail_max_dimension)
+        (
+            settings.concurrency,
+            settings.aria2_connections,
+            settings.rate_limit_kibs,
+            settings.thumbnail_max_dimension,
+        )
     };
     Json(json!({
         "concurrency": clamped.0,
@@ -839,7 +920,10 @@ async fn acknowledge_cookies_warning() -> Json<serde_json::Value> {
 }
 
 async fn get_logs(Query(q): Query<HashMap<String, String>>) -> Json<serde_json::Value> {
-    let lines = q.get("lines").and_then(|v| v.parse::<usize>().ok()).unwrap_or(200);
+    let lines = q
+        .get("lines")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(200);
     Json(json!({"logs": log::read_last_lines(&config().log_file, lines)}))
 }
 
@@ -867,7 +951,10 @@ async fn get_songs() -> Json<serde_json::Value> {
 async fn cli_songs() {
     config::init();
     let Ok(connect) = rusqlite::Connection::open(&config().queue_db_path) else {
-        eprintln!("error: no catalog yet ({} not found)", config().queue_db_path);
+        eprintln!(
+            "error: no catalog yet ({} not found)",
+            config().queue_db_path
+        );
         std::process::exit(1);
     };
     let (songs, total, total_bytes) = {
@@ -900,7 +987,10 @@ async fn cli_songs() {
 async fn cli_check(url: &str) {
     config::init();
     let result = ytdlp::check_quality(url).await;
-    println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&result).unwrap_or_default()
+    );
     if result["premium_opus_available"].as_bool() == Some(true) {
         println!("\n[PREMIUM OK] 256kbps Opus (itag 774) available -- downloads will use it.");
         std::process::exit(0);
@@ -938,7 +1028,9 @@ async fn main() {
                 steps: Mutex::new(HashMap::new()),
                 cancel_flags: Mutex::new(HashMap::new()),
                 settings: Mutex::new(Settings {
-                    concurrency: config().concurrency_default.clamp(1, config().concurrency_max),
+                    concurrency: config()
+                        .concurrency_default
+                        .clamp(1, config().concurrency_max),
                     aria2_connections: config().aria2c_connections.clamp(1, 32),
                     rate_limit_kibs: config().default_rate_limit_kibs.clamp(0, 1024 * 1024),
                     thumbnail_max_dimension: config().thumbnail_max_dimension.clamp(80, 4096),
@@ -976,7 +1068,10 @@ async fn main() {
         .route("/api/queue/{item_id}/retry", post(retry_item))
         .route("/api/cleanup", post(run_cleanup))
         .route("/api/settings", get(get_settings).post(update_settings))
-        .route("/api/cookies/acknowledge", post(acknowledge_cookies_warning))
+        .route(
+            "/api/cookies/acknowledge",
+            post(acknowledge_cookies_warning),
+        )
         .route("/api/history", get(get_history))
         .route("/api/logs", get(get_logs))
         .route("/api/quality", get(get_quality))

@@ -75,7 +75,10 @@ pub fn finalize_pipeline(
                 compressed_thumb = Some(destination);
             }
             _ => {
-                error!("ffmpeg thumbnail compression failed for {title}: {:?}", out.map_err(|e| e.to_string()));
+                error!(
+                    "ffmpeg thumbnail compression failed for {title}: {:?}",
+                    out.map_err(|e| e.to_string())
+                );
                 report("Thumbnail", "failed", "Thumbnail compression failed");
             }
         }
@@ -143,7 +146,8 @@ fn tag_opus(path: &Path, title: &str, artist: &str, cover: Option<&Path>) -> Res
         .write(true)
         .open(path)
         .map_err(|e| e.to_string())?;
-    let mut tagged = BoundTaggedFile::read_from(file, ParseOptions::new()).map_err(|e| e.to_string())?;
+    let mut tagged =
+        BoundTaggedFile::read_from(file, ParseOptions::new()).map_err(|e| e.to_string())?;
 
     // An Opus file's metadata packet is mandatory, so a primary Vorbis
     // comments tag effectively always exists.
@@ -168,7 +172,9 @@ fn tag_opus(path: &Path, title: &str, artist: &str, cover: Option<&Path>) -> Res
         tag.push_picture(picture);
     }
 
-    tagged.save(WriteOptions::default()).map_err(|e| e.to_string())
+    tagged
+        .save(WriteOptions::default())
+        .map_err(|e| e.to_string())
 }
 
 // Small shim so stem + suffix strings stay simple without pulling in

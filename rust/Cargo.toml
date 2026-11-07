@@ -2,7 +2,7 @@
 name = "bulker-rs"
 version = "0.1.0"
 edition = "2021"
-description = "Rust port of Bulker: FastAPI+yt-dlp bulk audio downloader, now axum+SQLite"
+description = "YouTube Music bulk audio downloader built with Axum and SQLite"
 
 [dependencies]
 axum = "0.8"

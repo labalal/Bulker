@@ -1,0 +1,8 @@
+{
+    "rust-analyzer.check.command": "clippy",
+    "rust-analyzer.check.extraArgs": [
+        "--all-targets",
+        "--all-features"
+    ],
+    "rust-analyzer.cargo.manifestPath": "${workspaceFolder}/rust/Cargo.toml"
+}
