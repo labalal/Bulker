@@ -440,7 +440,7 @@ fn cleanup_existing_mess() {
     for dir in [&cfg.songs_archive_dir, &cfg.temp_workspace_dir] {
         let _ = std::fs::create_dir_all(dir);
     }
-    let Ok(root) = std::fs::canonicalize(&cfg.download_dir) else {
+    let Ok(root) = std::fs::canonicalize(&cfg.temp_workspace_dir) else {
         return;
     };
     let mut stack = vec![root.clone()];
@@ -509,8 +509,7 @@ fn cleanup_workspace() -> usize {
     }
     let cfg = config();
     let saved = identifiers(&cfg.songs_archive_dir)
-        .union(&identifiers(&cfg.download_dir))
-        .cloned()
+        .into_iter()
         .collect::<std::collections::HashSet<_>>();
     let mut removed = 0;
     if let Ok(rd) = std::fs::read_dir(&cfg.temp_workspace_dir) {
