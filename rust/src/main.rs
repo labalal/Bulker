@@ -10,10 +10,13 @@
 //!   - mutagen  -> lofty (native Rust Opus tagging)
 //!   - the whole thing lives in one process with no Python runtime
 
+mod adb_scanner;
 mod config;
 mod db;
 mod log;
+mod organizer;
 mod tag;
+mod tui;
 mod ytdlp;
 
 use axum::extract::{Path, Query, State};
@@ -25,6 +28,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeMap;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -34,6 +38,7 @@ use mimalloc::MiMalloc;
 
 use crate::config::config;
 use crate::db::{Db, HistoryEntry, Item};
+use crate::organizer::{MusicMetadata, extract_metadata_from_ytdlp};
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 const HTML_SRC: &str = include_str!("../../web/index.html");
@@ -296,6 +301,17 @@ async fn process_item(item: &Item, cancel: Arc<AtomicBool>) {
                     meta.selected_format_id.clone(),
                     state().settings.lock().unwrap().thumbnail_max_dimension,
                 );
+                
+                // Build metadata for organized archival
+                let entry = crate::ytdlp::Entry {
+                    title: meta.title.clone(),
+                    url: item.url.clone(),
+                    uploader: meta.artist.clone(),
+                    duration: meta.duration,
+                    from_playlist: item.from_playlist,
+                };
+                let archive_meta = extract_metadata_from_ytdlp(&entry, meta.duration);
+                
                 match tag::finalize_pipeline(
                     meta.opus_path,
                     meta.thumb_path,
@@ -304,6 +320,7 @@ async fn process_item(item: &Item, cancel: Arc<AtomicBool>) {
                     &cancel,
                     &report,
                     library.5,
+                    &archive_meta,
                 ) {
                     Ok(path) => {
                         info!("Completed: {} -> {}", item.title, path.display());
@@ -1002,6 +1019,229 @@ async fn cli_check(url: &str) {
     std::process::exit(1);
 }
 
+async fn cli_phone_scan(device_id: Option<String>, max_bitrate: Option<i32>, dry_run: bool) {
+    config::init();
+
+    let devices = adb_scanner::AdbScanner::list_devices().unwrap_or_default();
+    if devices.is_empty() {
+        eprintln!("No ADB devices found. Enable USB debugging and connect your phone.");
+        std::process::exit(1);
+    }
+
+    let scanner = adb_scanner::AdbScanner::new(device_id.clone());
+    
+    println!("Scanning phone for music files...");
+    let songs = scanner.scan_music_directories().unwrap_or_default();
+    
+    if songs.is_empty() {
+        println!("No music files found on device.");
+        return;
+    }
+
+    println!("Found {} total songs", songs.len());
+
+    let max_br = max_bitrate.unwrap_or(96);
+    let low_bitrate = scanner.filter_low_bitrate(&songs, max_br);
+    
+    println!("Found {} songs with bitrate <= {} kbps", low_bitrate.len(), max_br);
+
+    for song in &low_bitrate {
+        let br = song.bitrate.map_or("unknown".to_string(), |b| format!("{} kbps", b));
+        println!("  [{}] {} - {} ({})", br, song.title, song.artist, song.file_path);
+    }
+
+    if dry_run {
+        println!("\nDry run complete. Use --no-dry-run to queue downloads.");
+        return;
+    }
+
+    log::init(&config().log_file);
+    cleanup_existing_mess();
+    match db::init(&config().queue_db_path) {
+        Ok(db) => {
+            let _ = STATE.set(Arc::new(AppState {
+                db,
+                items: Mutex::new(FxHashMap::default()),
+                order: Mutex::new(Vec::new()),
+                history: Mutex::new(Vec::new()),
+                steps: Mutex::new(FxHashMap::default()),
+                cancel_flags: Mutex::new(FxHashMap::default()),
+                settings: Mutex::new(Settings {
+                    concurrency: config()
+                        .concurrency_default
+                        .clamp(1, config().concurrency_max),
+                    aria2_connections: config().aria2c_connections.clamp(1, 32),
+                    rate_limit_kibs: config().default_rate_limit_kibs.clamp(0, 1024 * 1024),
+                    thumbnail_max_dimension: config().thumbnail_max_dimension.clamp(80, 4096),
+                }),
+                active_downloads: Mutex::new(0),
+            }));
+        }
+        Err(e) => {
+            eprintln!("FATAL: could not init queue.db: {e:#}");
+            std::process::exit(1);
+        }
+    }
+
+    println!("\nSearching and queuing {} songs for re-download...", low_bitrate.len());
+    
+    let mut queued = 0;
+    for song in &low_bitrate {
+        let query = adb_scanner::build_search_query(song);
+        match ytdlp::search_videos(&query, 1).await.first() {
+            Some(entry) => {
+                let s = state();
+                let mut items = s.items.lock().unwrap();
+                let mut order = s.order.lock().unwrap();
+                let mut steps = s.steps.lock().unwrap();
+                let mut flags = s.cancel_flags.lock().unwrap();
+                
+                let item = crate::new_item(entry.url.clone(), entry.title.clone(), false);
+                items.insert(item.id.clone(), item.clone());
+                order.push(item.id.clone());
+                steps.insert(item.id.clone(), crate::fresh_steps());
+                flags.insert(item.id.clone(), Arc::new(AtomicBool::new(false)));
+                
+                println!("  Queued: {} - {}", entry.title, entry.uploader);
+                queued += 1;
+            }
+            None => {
+                println!("  Not found: {}", query);
+            }
+        }
+    }
+    
+    persist_now();
+    println!("\nQueued {} songs for download.", queued);
+}
+
+async fn cli_phone_list(device_id: Option<String>) {
+    config::init();
+
+    let devices = adb_scanner::AdbScanner::list_devices().unwrap_or_default();
+    if devices.is_empty() {
+        eprintln!("No ADB devices found. Enable USB debugging and connect your phone.");
+        std::process::exit(1);
+    }
+    
+    let scanner = adb_scanner::AdbScanner::new(device_id);
+    let songs = scanner.scan_music_directories().unwrap_or_default();
+    
+    if songs.is_empty() {
+        println!("No music files found on device.");
+        return;
+    }
+
+    println!("Found {} songs:", songs.len());
+    for song in &songs {
+        let br = song.bitrate.map_or("unknown".to_string(), |b| format!("{} kbps", b));
+        println!("  [{}] {} - {} ({})", br, song.title, song.artist, song.file_path);
+    }
+}
+
+async fn cli_queue_from_file(file_path: String) {
+    config::init();
+    log::init(&config().log_file);
+
+    cleanup_existing_mess();
+    match db::init(&config().queue_db_path) {
+        Ok(db) => {
+            let _ = STATE.set(Arc::new(AppState {
+                db,
+                items: Mutex::new(FxHashMap::default()),
+                order: Mutex::new(Vec::new()),
+                history: Mutex::new(Vec::new()),
+                steps: Mutex::new(FxHashMap::default()),
+                cancel_flags: Mutex::new(FxHashMap::default()),
+                settings: Mutex::new(Settings {
+                    concurrency: config()
+                        .concurrency_default
+                        .clamp(1, config().concurrency_max),
+                    aria2_connections: config().aria2c_connections.clamp(1, 32),
+                    rate_limit_kibs: config().default_rate_limit_kibs.clamp(0, 1024 * 1024),
+                    thumbnail_max_dimension: config().thumbnail_max_dimension.clamp(80, 4096),
+                }),
+                active_downloads: Mutex::new(0),
+            }));
+        }
+        Err(e) => {
+            eprintln!("FATAL: could not init queue.db: {e:#}");
+            std::process::exit(1);
+        }
+    }
+
+    let content = std::fs::read_to_string(&file_path).expect("Failed to read file");
+    let video_ids: Vec<String> = content
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| l.to_string())
+        .collect();
+
+    println!("Queuing {} songs from {}...", video_ids.len(), file_path);
+    let mut queued = 0;
+    
+    for id in video_ids {
+        let url = format!("https://music.youtube.com/watch?v={}", id);
+        println!("  Searching: {}", url);
+        
+        match ytdlp::search_videos(&url, 1).await.first() {
+            Some(entry) => {
+                let s = state();
+                let mut items = s.items.lock().unwrap();
+                let mut order = s.order.lock().unwrap();
+                let mut steps = s.steps.lock().unwrap();
+                let mut flags = s.cancel_flags.lock().unwrap();
+                
+                let item = crate::new_item(entry.url.clone(), entry.title.clone(), false);
+                items.insert(item.id.clone(), item.clone());
+                order.push(item.id.clone());
+                steps.insert(item.id.clone(), crate::fresh_steps());
+                flags.insert(item.id.clone(), Arc::new(AtomicBool::new(false)));
+                
+                println!("    ✓ Queued: {} - {}", entry.title, entry.uploader);
+                queued += 1;
+            }
+            None => {
+                println!("    ✗ Not found: {}", url);
+            }
+        }
+    }
+    
+    persist_now();
+    println!("\nDone! Queued {} songs.", queued);
+    println!("Run 'cargo run' to start downloading.");
+}
+
+async fn cli_archive_tui() {
+    config::init();
+    let archive_dir = PathBuf::from(&config().songs_archive_dir);
+    
+    println!("Scanning archive directory: {}", archive_dir.display());
+    let items = tui::scan_archive_dir(&archive_dir).unwrap_or_default();
+    
+    if items.is_empty() {
+        println!("No songs found in archive.");
+        return;
+    }
+    
+    println!("Found {} songs. Starting TUI...", items.len());
+    
+    let mut tui = tui::ArchiveTui::new(items);
+    match tui.run() {
+        Ok(selected) => {
+            println!("\nSelected {} items:", selected.len());
+            for item in &selected {
+                println!("  {} - {} ({})", item.artist, item.title, item.path.display());
+            }
+            // TODO: Add actions for selected items (delete, move, export)
+        }
+        Err(e) => {
+            eprintln!("TUI error: {}", e);
+        }
+    }
+}
+
 // --- wiring ----------------------------------------------------------------
 
 #[tokio::main]
@@ -1012,8 +1252,28 @@ async fn main() {
         cli_check(&args[2]).await;
     } else if args.len() == 2 && args[1] == "songs" {
         cli_songs().await;
+    } else if args.len() >= 2 && args[1] == "phone-scan" {
+        let device_id = args.iter().position(|a| a == "-d" || a == "--device")
+            .and_then(|i| args.get(i + 1))
+            .cloned();
+        let max_bitrate = args.iter().position(|a| a == "--max-bitrate")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse::<i32>().ok());
+        let dry_run = !args.contains(&"--no-dry-run".to_string());
+        cli_phone_scan(device_id, max_bitrate, dry_run).await;
+    } else if args.len() >= 2 && args[1] == "phone-list" {
+        let device_id = args.iter().position(|a| a == "-d" || a == "--device")
+            .and_then(|i| args.get(i + 1))
+            .cloned();
+        cli_phone_list(device_id).await;
+    } else if args.len() >= 2 && args[1] == "queue-from-file" {
+        let file_path = args.get(2).expect("Usage: bulker-rs queue-from-file <file.txt>");
+        cli_queue_from_file(file_path.clone()).await;
+    } else if args.len() >= 2 && args[1] == "archive-tui" {
+        config::init();
+        cli_archive_tui().await;
     } else if args.len() > 1 {
-        eprintln!("usage: bulker-rs [check <url> | songs]  (no args = start the server/daemon)");
+        eprintln!("usage: bulker-rs [check <url> | songs | phone-scan [--device ID] [--max-bitrate N] [--no-dry-run] | phone-list [--device ID] | queue-from-file <file.txt> | archive-tui]  (no args = start the server/daemon)");
         std::process::exit(2);
     }
 

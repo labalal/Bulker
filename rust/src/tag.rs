@@ -1,4 +1,5 @@
 use crate::config::config;
+use crate::organizer::{MusicMetadata, MusicOrganizer, OrganizedPath};
 use crate::{error, info, warn};
 use lofty::config::{ParseOptions, WriteOptions};
 use lofty::file::{BoundTaggedFile, TaggedFileExt};
@@ -13,15 +14,14 @@ use std::sync::Arc;
 /// Progress reporter handed in by the worker: (step, state, detail).
 pub type Reporter<'a> = &'a (dyn Fn(&str, &str, &str) + Send + Sync);
 
-/// The tag/archival pipeline, a faithful port of Python's OpusTagPP:
+/// The tag/archival pipeline with organized folder structure:
 ///
 ///   1. compress the fetched thumbnail to a 320px JPEG with ffmpeg
 ///   2. embed title + artist + compressed artwork into the .opus file's
-///      Vorbis comments natively (lofty instead of mutagen -- mutagen has
-///      no Rust equivalent, and the Python process boundary is one of the
-///      things this rewrite exists to remove)
-///   3. move the finished file into Songs_archive, delete thumbnail junk
-///      left in temp_workspace
+///      Vorbis comments natively (lofty instead of mutagen)
+///   3. move the finished file into organized Songs_archive/{Artist}/{Album}/{Track}
+///      Long-form content (>=30 min) goes to Songs_archive/Long_Form/{Artist}/
+///   4. delete thumbnail junk left in temp_workspace
 ///
 /// Returns the final archive path on success.
 pub fn finalize_pipeline(
@@ -32,6 +32,7 @@ pub fn finalize_pipeline(
     cancel: &Arc<AtomicBool>,
     report: Reporter,
     thumb_dim: i64,
+    meta: &MusicMetadata,
 ) -> Result<PathBuf, String> {
     report("Extract Audio", "done", "Audio extracted (Opus)");
 
@@ -40,14 +41,11 @@ pub fn finalize_pipeline(
         return Err("Source audio file missing after extraction".to_string());
     }
 
-    // If the user hit cancel while yt-dlp was still running, don't tag the
-    // orphan -- delete it instead (the Python version did the same).
     if cancel.load(Ordering::Relaxed) {
         let _ = std::fs::remove_file(&opus_path);
         return Err("__cancelled__".to_string());
     }
 
-    // Base name without the .opus extension, e.g. "Title [id]".
     let stem = opus_path
         .file_stem()
         .map(|s| s.to_os_string())
@@ -96,18 +94,21 @@ pub fn finalize_pipeline(
         report("Metadata", "done", "Metadata embedded");
     }
 
-    // --- 3. archive -----------------------------------------------------------
-    report("Archive", "active", "Moving to archive...");
-    let archive_dir = Path::new(&config().songs_archive_dir);
-    let _ = std::fs::create_dir_all(archive_dir);
-    let final_path = archive_dir.join(
-        opus_path
-            .file_name()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("untitled.opus")),
-    );
-    if let Err(e) = std::fs::rename(&opus_path, &final_path) {
-        match std::fs::copy(&opus_path, &final_path) {
+    // --- 3. organize & archive ----------------------------------------------
+    report("Archive", "active", "Organizing into archive...");
+    
+    let organizer = MusicOrganizer::new(PathBuf::from(&config().songs_archive_dir))
+        .with_long_form_threshold(30.0)
+        .with_musicbrainz(true);
+    
+    let organized = organizer.organize(meta)
+        .map_err(|e| format!("Failed to organize: {e}"))?;
+    
+    organizer.ensure_dirs(&organized.full_path)
+        .map_err(|e| format!("Failed to create directories: {e}"))?;
+
+    if let Err(e) = std::fs::rename(&opus_path, &organized.full_path) {
+        match std::fs::copy(&opus_path, &organized.full_path) {
             Ok(_) => {
                 let _ = std::fs::remove_file(&opus_path);
             }
@@ -118,14 +119,16 @@ pub fn finalize_pipeline(
             }
         }
     }
-    report("Archive", "done", "Moved to archive");
+    
+    let folder_type = if organized.is_long_form { "Long_Form" } else { "Music" };
+    report("Archive", "done", &format!("Moved to {}/{}", folder_type, organized.relative_path.display()));
 
     // Sweep thumbnail leftovers for this file out of temp_workspace.
     remove_if_exists(&format!("{}.jpg", stem.to_string_lossy()));
     remove_if_exists(&format!("{}_small.jpg", stem.to_string_lossy()));
     remove_if_exists(&format!("{}.webp", stem.to_string_lossy()));
 
-    Ok(final_path)
+    Ok(organized.full_path)
 }
 
 fn remove_if_exists(path: &str) {
