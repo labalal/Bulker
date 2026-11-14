@@ -7,7 +7,7 @@ use std::sync::Arc;
 /// and prepared pragmas optimized for 8KB pages and NVMe/SSD storage.
 pub struct Sqlite {
     pool: Arc<Mutex<Vec<Connection>>>,
-    path: String,
+    pub path: String,
     config: SqliteConfig,
 }
 
@@ -248,7 +248,7 @@ impl PooledConn {
     }
     
     /// Starts a transaction with BEGIN IMMEDIATE to guarantee no upgrade deadlocks.
-    pub fn transaction(&mut self) -> Result<Transaction> {
+    pub fn transaction(&mut self) -> Result<Transaction<'_>> {
         self.raw_conn_mut().transaction_with_behavior(TransactionBehavior::Immediate)
             .context("starting immediate transaction")
     }

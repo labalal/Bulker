@@ -102,7 +102,7 @@ impl ArchiveTui {
     }
 
     fn ui(&mut self, f: &mut ratatui::Frame) {
-        let size = f.size();
+        let size = f.area();
         
         if self.show_help {
             self.render_help(f, size);

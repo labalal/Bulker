@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::process::Command;
 use std::path::PathBuf;
+use crate::security::{validate_device_id, sanitize_filename};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ScannedSong {
@@ -22,13 +23,14 @@ impl AdbScanner {
         Self { device_id }
     }
 
-    fn adb_cmd(&self, args: &[&str]) -> Command {
+    fn adb_cmd(&self, args: &[&str]) -> Result<Command> {
         let mut cmd = Command::new("adb");
         if let Some(ref id) = self.device_id {
-            cmd.args(["-s", id]);
+            let clean_id = validate_device_id(id)?;
+            cmd.args(["-s", &clean_id]);
         }
         cmd.args(args);
-        cmd
+        Ok(cmd)
     }
 
     pub fn list_devices() -> Result<Vec<String>> {
@@ -44,7 +46,7 @@ impl AdbScanner {
             .filter_map(|line| {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 2 && parts[1] == "device" {
-                    Some(parts[0].to_string())
+                    validate_device_id(parts[0]).ok()
                 } else {
                     None
                 }
@@ -88,25 +90,27 @@ impl AdbScanner {
         let extensions = ["opus", "mp3", "flac", "m4a", "ogg", "wav"];
         let mut all_files = Vec::new();
         
-        for ext in extensions {
-            let find_cmd = format!("ls {}/*.{} 2>/dev/null", dir, ext);
-            let output = self.adb_cmd(&["shell", &find_cmd])
-                .output()
-                .context("Failed to run ls command")?;
-            
+        // Execute 'ls' directly without shell expansion to prevent command injection
+        let mut cmd = self.adb_cmd(&["shell", "ls", dir])?;
+        if let Ok(output) = cmd.output() {
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 for line in stdout.lines() {
                     let trimmed = line.trim();
-                    if !trimmed.is_empty() && !trimmed.contains("No such file") {
-                        all_files.push(trimmed.to_string());
+                    if trimmed.is_empty() || trimmed.contains("No such file") {
+                        continue;
+                    }
+                    for ext in &extensions {
+                        if trimmed.ends_with(&format!(".{ext}")) {
+                            all_files.push(format!("{dir}/{trimmed}"));
+                            break;
+                        }
                     }
                 }
             }
         }
 
         let mut songs = Vec::new();
-        
         for file in all_files {
             if let Ok(song) = self.extract_metadata(&file) {
                 songs.push(song);
@@ -117,14 +121,13 @@ impl AdbScanner {
     }
 
     fn extract_metadata(&self, file_path: &str) -> Result<ScannedSong> {
-        let output = self.adb_cmd(&[
+        let mut cmd = self.adb_cmd(&[
             "shell",
             "mediainfo",
             "--Inform=General;%Title%|%Performer%|%Album%|%Duration%|%BitRate%",
             file_path
-        ])
-        .output()
-        .context("Failed to run mediainfo")?;
+        ])?;
+        let output = cmd.output().context("Failed to run mediainfo")?;
 
         let mut title = String::new();
         let mut artist = String::new();
@@ -157,6 +160,9 @@ impl AdbScanner {
             artist = "Unknown Artist".to_string();
         }
 
+        // Sanitize extracted metadata
+        let title = sanitize_filename(&title);
+        let artist = sanitize_filename(&artist);
         let file_size = self.get_file_size(file_path).unwrap_or(0);
 
         Ok(ScannedSong {
@@ -171,9 +177,8 @@ impl AdbScanner {
     }
 
     fn get_file_size(&self, file_path: &str) -> Result<i64> {
-        let output = self.adb_cmd(&["shell", "stat", "-c", "%s", file_path])
-            .output()
-            .context("Failed to get file size")?;
+        let mut cmd = self.adb_cmd(&["shell", "stat", "-c", "%s", file_path])?;
+        let output = cmd.output().context("Failed to get file size")?;
 
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();

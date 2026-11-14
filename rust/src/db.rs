@@ -1,6 +1,5 @@
 use crate::sqlite::{Sqlite, SqliteConfig, PooledConn};
-use anyhow::{Context, Result};
-use rusqlite::TransactionBehavior;
+use anyhow::Result;
 use rustc_hash::FxHashMap;
 
 /// Database wrapper using minimal Sqlite connection pool and batched transactions.

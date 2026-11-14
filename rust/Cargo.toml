@@ -26,6 +26,7 @@ num_cpus = "1.16"
 parking_lot = "0.12"
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
+bulker-adb-scanner = { path = "../adb_scanner" }
 
 [build-dependencies]
 num_cpus = "1.16"

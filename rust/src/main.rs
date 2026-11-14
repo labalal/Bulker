@@ -15,11 +15,16 @@ mod config;
 mod db;
 mod log;
 mod organizer;
+pub mod page_cache;
+pub mod plugin;
 mod queue_organizer;
+pub mod security;
 mod sqlite;
 mod tag;
 mod tui;
 mod ytdlp;
+
+use adb_scanner::{AdbScanner, ScannedSong, build_search_query};
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -63,7 +68,8 @@ struct Settings {
 }
 
 struct AppState {
-    db: Db,
+    db: Arc<Db>,
+    plugin_manager: plugin::PluginManager,
     queue_organizer: QueueOrganizer,
     items: Mutex<FxHashMap<String, Item>>,
     order: Mutex<Vec<String>>,
@@ -78,6 +84,35 @@ struct AppState {
 static STATE: OnceLock<Arc<AppState>> = OnceLock::new();
 fn state() -> &'static Arc<AppState> {
     STATE.get().expect("state initialized")
+}
+
+fn create_app_state(db_config: DbConfig, organizer_config: OrganizerConfig) -> Arc<AppState> {
+    let db = Arc::new(Db::new(db_config).expect("Failed to create DB"));
+    let plugin_manager = plugin::PluginManager::new(db.clone());
+    plugin_manager.register(Arc::new(plugin::adb_phone::AdbPhonePlugin::new()));
+    plugin_manager.register(Arc::new(plugin::template::CustomTemplatePlugin::new()));
+    let queue_organizer = QueueOrganizer::new(organizer_config);
+
+    Arc::new(AppState {
+        db,
+        plugin_manager,
+        queue_organizer,
+        items: Mutex::new(FxHashMap::default()),
+        order: Mutex::new(Vec::new()),
+        history: Mutex::new(Vec::new()),
+        steps: Mutex::new(FxHashMap::default()),
+        cancel_flags: Mutex::new(FxHashMap::default()),
+        settings: Mutex::new(Settings {
+            concurrency: config()
+                .concurrency_default
+                .clamp(1, config().concurrency_max),
+            aria2_connections: config().aria2c_connections.clamp(1, 32),
+            rate_limit_kibs: config().default_rate_limit_kibs.clamp(0, 1024 * 1024),
+            thumbnail_max_dimension: config().thumbnail_max_dimension.clamp(80, 4096),
+        }),
+        active_downloads: Mutex::new(0),
+        active_large_downloads: Mutex::new(0),
+    })
 }
 
 fn fresh_steps() -> Steps {
@@ -669,8 +704,27 @@ async fn add_to_queue(
     let mut duplicates = Vec::new();
     
     for raw_url in urls {
+        // Enforce user data sanitization and prevent SSRF / CLI flag injection
+        if let Err(e) = security::validate_youtube_url(&raw_url) {
+            warn!("Skipping unsafe input URL '{}': {}", raw_url, e);
+            continue;
+        }
+
         let video_id = ytdlp::query_param(&raw_url, "v");
         let list_id = ytdlp::query_param(&raw_url, "list");
+
+        if let Some(ref vid) = video_id {
+            if let Err(e) = security::validate_youtube_id(vid) {
+                warn!("Skipping invalid video id '{}': {}", vid, e);
+                continue;
+            }
+        }
+        if let Some(ref lid) = list_id {
+            if let Err(e) = security::validate_youtube_id(lid) {
+                warn!("Skipping invalid playlist id '{}': {}", lid, e);
+                continue;
+            }
+        }
 
         let entries: Vec<ytdlp::Entry> = if video_id.is_some() && list_id.is_none() {
             let meta = ytdlp::fetch_metadata(&raw_url).await;
@@ -820,7 +874,11 @@ fn record_library(
         channels: None,
         bit_depth: None,
     };
-    state().db.insert_song(&song);
+    let _ = state().db.insert_song(&song);
+    let song_clone = song.clone();
+    tokio::spawn(async move {
+        state().plugin_manager.dispatch_song_downloaded(&song_clone).await;
+    });
 }
 
 async fn get_history() -> Json<serde_json::Value> {
@@ -1002,19 +1060,19 @@ async fn update_settings(Json(req): Json<SettingsRequest>) -> Json<serde_json::V
         let mut settings = s.settings.lock().unwrap();
         if let Some(c) = req.concurrency {
             settings.concurrency = c.clamp(1, config().concurrency_max);
-            s.db.save_setting("concurrency", settings.concurrency as i64);
+            let _ = s.db.save_setting("concurrency", settings.concurrency as i64);
         }
         if let Some(a) = req.aria2_connections {
             settings.aria2_connections = a.clamp(1, 32);
-            s.db.save_setting("aria2_connections", a);
+            let _ = s.db.save_setting("aria2_connections", a);
         }
         if let Some(r) = req.rate_limit_kibs {
             settings.rate_limit_kibs = r.clamp(0, 1024 * 1024);
-            s.db.save_setting("rate_limit_kibs", r);
+            let _ = s.db.save_setting("rate_limit_kibs", r);
         }
         if let Some(t) = req.thumbnail_max_dimension {
             settings.thumbnail_max_dimension = t.clamp(80, 4096);
-            s.db.save_setting("thumbnail_max_dimension", t);
+            let _ = s.db.save_setting("thumbnail_max_dimension", t);
         }
         (
             settings.concurrency,
@@ -1063,11 +1121,36 @@ async fn get_songs() -> Json<serde_json::Value> {
     }))
 }
 
+#[derive(Deserialize)]
+struct PluginCommandRequest {
+    command: String,
+    #[serde(default)]
+    args: serde_json::Value,
+}
+
+async fn list_plugins() -> Json<serde_json::Value> {
+    let plugins = state().plugin_manager.list_plugins();
+    Json(json!({ "plugins": plugins }))
+}
+
+async fn execute_plugin_command(
+    Path(plugin_id): Path<String>,
+    Json(req): Json<PluginCommandRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    match state().plugin_manager.execute_command(&plugin_id, &req.command, &req.args).await {
+        Ok(result) => Ok(Json(result)),
+        Err(e) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )),
+    }
+}
+
 /// CLI subcommand: `bulker-rs check <url>` -- runs against yt-dlp directly,
 /// no server needed. Part of the "CLI tools" role.
 async fn cli_songs() {
     config::init();
-    let Ok(connect) = rusqlite::Connection::open(&config().queue_db_path) else {
+    let Ok(_connect) = rusqlite::Connection::open(&config().queue_db_path) else {
         eprintln!(
             "error: no catalog yet ({} not found)",
             config().queue_db_path
@@ -1119,13 +1202,13 @@ async fn cli_check(url: &str) {
 async fn cli_phone_scan(device_id: Option<String>, max_bitrate: Option<i32>, dry_run: bool) {
     config::init();
 
-    let devices = adb_scanner::AdbScanner::list_devices().unwrap_or_default();
+    let devices = AdbScanner::list_devices().unwrap_or_default();
     if devices.is_empty() {
         eprintln!("No ADB devices found. Enable USB debugging and connect your phone.");
         std::process::exit(1);
     }
 
-    let scanner = adb_scanner::AdbScanner::new(device_id.clone());
+    let scanner = AdbScanner::new(device_id.clone());
     
     println!("Scanning phone for music files...");
     let songs = scanner.scan_music_directories().unwrap_or_default();
@@ -1157,42 +1240,21 @@ async fn cli_phone_scan(device_id: Option<String>, max_bitrate: Option<i32>, dry
     let db_config = DbConfig {
         path: config().queue_db_path.clone(),
         pool_size: config().concurrency_max * 2,
-        busy_timeout_ms: 5000,
+        busy_timeout_ms: 10000,
         wal_mode: true,
-        cache_size_kib: -32768,
+        cache_size_kib: -65536,
         mmap_size_mib: 256,
-        page_size: 4096,
+        page_size: page_cache::SQLITE_PAGE_SIZE as u32,
         temp_store: crate::sqlite::TempStore::Memory,
     };
-    let db = Db::new(db_config).expect("Failed to create DB");
     let organizer_config = OrganizerConfig::default();
-    let queue_organizer = QueueOrganizer::new(organizer_config);
-    
-    let _ = STATE.set(Arc::new(AppState {
-        db,
-        queue_organizer,
-        items: Mutex::new(FxHashMap::default()),
-        order: Mutex::new(Vec::new()),
-        history: Mutex::new(Vec::new()),
-        steps: Mutex::new(FxHashMap::default()),
-        cancel_flags: Mutex::new(FxHashMap::default()),
-        settings: Mutex::new(Settings {
-            concurrency: config()
-                .concurrency_default
-                .clamp(1, config().concurrency_max),
-            aria2_connections: config().aria2c_connections.clamp(1, 32),
-            rate_limit_kibs: config().default_rate_limit_kibs.clamp(0, 1024 * 1024),
-            thumbnail_max_dimension: config().thumbnail_max_dimension.clamp(80, 4096),
-        }),
-        active_downloads: Mutex::new(0),
-        active_large_downloads: Mutex::new(0),
-    }));
+    let _ = STATE.set(create_app_state(db_config, organizer_config));
 
     println!("\nSearching and queuing {} songs for re-download...", low_bitrate.len());
     
     let mut queued = 0;
     for song in &low_bitrate {
-        let query = adb_scanner::build_search_query(song);
+        let query = build_search_query(song);
         match ytdlp::search_videos(&query, 1).await.first() {
             Some(entry) => {
                 let s = state();
@@ -1223,13 +1285,13 @@ async fn cli_phone_scan(device_id: Option<String>, max_bitrate: Option<i32>, dry
 async fn cli_phone_list(device_id: Option<String>) {
     config::init();
 
-    let devices = adb_scanner::AdbScanner::list_devices().unwrap_or_default();
+    let devices = AdbScanner::list_devices().unwrap_or_default();
     if devices.is_empty() {
         eprintln!("No ADB devices found. Enable USB debugging and connect your phone.");
         std::process::exit(1);
     }
     
-    let scanner = adb_scanner::AdbScanner::new(device_id);
+    let scanner = AdbScanner::new(device_id);
     let songs = scanner.scan_music_directories().unwrap_or_default();
     
     if songs.is_empty() {
@@ -1252,36 +1314,15 @@ async fn cli_queue_from_file(file_path: String) {
     let db_config = DbConfig {
         path: config().queue_db_path.clone(),
         pool_size: config().concurrency_max * 2,
-        busy_timeout_ms: 5000,
+        busy_timeout_ms: 10000,
         wal_mode: true,
-        cache_size_kib: -32768,
+        cache_size_kib: -65536,
         mmap_size_mib: 256,
-        page_size: 4096,
+        page_size: page_cache::SQLITE_PAGE_SIZE as u32,
         temp_store: crate::sqlite::TempStore::Memory,
     };
-    let db = Db::new(db_config).expect("Failed to create DB");
     let organizer_config = OrganizerConfig::default();
-    let queue_organizer = QueueOrganizer::new(organizer_config);
-    
-    let _ = STATE.set(Arc::new(AppState {
-        db,
-        queue_organizer,
-        items: Mutex::new(FxHashMap::default()),
-        order: Mutex::new(Vec::new()),
-        history: Mutex::new(Vec::new()),
-        steps: Mutex::new(FxHashMap::default()),
-        cancel_flags: Mutex::new(FxHashMap::default()),
-        settings: Mutex::new(Settings {
-            concurrency: config()
-                .concurrency_default
-                .clamp(1, config().concurrency_max),
-            aria2_connections: config().aria2c_connections.clamp(1, 32),
-            rate_limit_kibs: config().default_rate_limit_kibs.clamp(0, 1024 * 1024),
-            thumbnail_max_dimension: config().thumbnail_max_dimension.clamp(80, 4096),
-        }),
-        active_downloads: Mutex::new(0),
-        active_large_downloads: Mutex::new(0),
-    }));
+    let _ = STATE.set(create_app_state(db_config, organizer_config));
 
     let content = std::fs::read_to_string(&file_path).expect("Failed to read file");
     let video_ids: Vec<String> = content
@@ -1398,15 +1439,13 @@ async fn main() {
     let db_config = DbConfig {
         path: config().queue_db_path.clone(),
         pool_size: config().concurrency_max * 2,
-        busy_timeout_ms: 5000,
+        busy_timeout_ms: 10000,
         wal_mode: true,
-        cache_size_kib: -32768,
+        cache_size_kib: -65536,
         mmap_size_mib: 256,
-        page_size: 4096,
+        page_size: page_cache::SQLITE_PAGE_SIZE as u32,
         temp_store: crate::sqlite::TempStore::Memory,
     };
-    
-    let db = Db::new(db_config).expect("Failed to create DB");
     
     let organizer_config = OrganizerConfig {
         max_queue_size: 10000,
@@ -1417,27 +1456,8 @@ async fn main() {
         max_concurrent_large: config().concurrency_max / 2,
         large_threshold_bytes: 10 * 1024 * 1024,
     };
-    let queue_organizer = QueueOrganizer::new(organizer_config);
     
-    let _ = STATE.set(Arc::new(AppState {
-        db,
-        queue_organizer,
-        items: Mutex::new(FxHashMap::default()),
-        order: Mutex::new(Vec::new()),
-        history: Mutex::new(Vec::new()),
-        steps: Mutex::new(FxHashMap::default()),
-        cancel_flags: Mutex::new(FxHashMap::default()),
-        settings: Mutex::new(Settings {
-            concurrency: config()
-                .concurrency_default
-                .clamp(1, config().concurrency_max),
-            aria2_connections: config().aria2c_connections.clamp(1, 32),
-            rate_limit_kibs: config().default_rate_limit_kibs.clamp(0, 1024 * 1024),
-            thumbnail_max_dimension: config().thumbnail_max_dimension.clamp(80, 4096),
-        }),
-        active_downloads: Mutex::new(0),
-        active_large_downloads: Mutex::new(0),
-    }));
+    let _ = STATE.set(create_app_state(db_config, organizer_config));
 
     let _ = std::fs::create_dir_all(&config().songs_archive_dir);
     let _ = std::fs::create_dir_all(&config().temp_workspace_dir);
@@ -1480,6 +1500,8 @@ async fn main() {
         .route("/api/logs", get(get_logs))
         .route("/api/quality", get(get_quality))
         .route("/api/songs", get(get_songs))
+        .route("/api/plugins", get(list_plugins))
+        .route("/api/plugins/{id}/command", post(execute_plugin_command))
         .with_state(state().clone());
 
     let addr = format!("{}:{}", config().host, config().port);

@@ -1,5 +1,5 @@
 use crate::config::config;
-use crate::organizer::{MusicMetadata, MusicOrganizer, OrganizedPath};
+use crate::organizer::{MusicMetadata, MusicOrganizer};
 use crate::{error, info, warn};
 use lofty::config::{ParseOptions, WriteOptions};
 use lofty::file::{BoundTaggedFile, TaggedFileExt};
