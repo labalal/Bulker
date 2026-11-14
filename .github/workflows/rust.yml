@@ -18,11 +18,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build Binary
+        working-directory: ./rust
         run: cargo build --release
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/bulker-rs # Ensure this matches your binary name
+          files: rust/target/release/bulker-rs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
