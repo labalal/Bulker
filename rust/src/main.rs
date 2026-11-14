@@ -15,6 +15,7 @@ mod config;
 mod db;
 mod log;
 mod organizer;
+mod queue_organizer;
 mod tag;
 mod tui;
 mod ytdlp;
@@ -37,8 +38,9 @@ use mimalloc::MiMalloc;
 
 
 use crate::config::config;
-use crate::db::{Db, HistoryEntry, Item};
+use crate::db::{Db, DbConfig, HistoryEntry, Item};
 use crate::organizer::{MusicMetadata, extract_metadata_from_ytdlp};
+use crate::queue_organizer::{QueueOrganizer, OrganizerConfig, QueueItem};
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 const HTML_SRC: &str = include_str!("../../web/index.html");
@@ -61,6 +63,7 @@ struct Settings {
 
 struct AppState {
     db: Db,
+    queue_organizer: QueueOrganizer,
     items: Mutex<FxHashMap<String, Item>>,
     order: Mutex<Vec<String>>,
     history: Mutex<Vec<HistoryEntry>>,
@@ -68,6 +71,7 @@ struct AppState {
     cancel_flags: Mutex<FxHashMap<String, Arc<AtomicBool>>>,
     settings: Mutex<Settings>,
     active_downloads: Mutex<usize>,
+    active_large_downloads: Mutex<usize>,
 }
 
 static STATE: OnceLock<Arc<AppState>> = OnceLock::new();
@@ -138,7 +142,7 @@ fn record_history(item: &Item) {
         history.push(entry.clone());
     }
     let limit = config().history_limit;
-    if let Err(e) = db::insert_history(&state().db, &entry, limit) {
+    if let Err(e) = state().db.insert_history(&entry, limit) {
         error!("Failed to append history: {e}");
     }
 }
@@ -149,7 +153,7 @@ fn persist_now() {
         (Ok(items), Ok(order)) => (items, order),
         _ => return,
     };
-    if let Err(e) = db::persist_items(&s.db, &order, &items) {
+    if let Err(e) = s.db.persist_items(&order, &items) {
         error!("Failed to save queue state: {e}");
     }
 }
@@ -401,34 +405,82 @@ fn cleanup_partial(item: &Item) {
 
 async fn worker() {
     loop {
-        let Some(item) = claim_next_item().await else {
+        let queue_items = {
+            let organizer = &state().queue_organizer;
+            organizer.get_next_batch(1, None)
+        };
+        
+        let Some(queue_item) = queue_items.into_iter().next() else {
             tokio::time::sleep(Duration::from_millis(500)).await;
             continue;
         };
+        
+        let is_large = queue_item.estimated_size > 10 * 1024 * 1024;
+        if is_large {
+            loop {
+                let count = *state().active_large_downloads.lock().unwrap();
+                if count < state().queue_organizer.config.max_concurrent_large {
+                    *state().active_large_downloads.lock().unwrap() += 1;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+        
         let cancel = {
             let flags = state().cancel_flags.lock().unwrap();
             flags
-                .get(&item.id)
+                .get(&queue_item.id)
                 .cloned()
                 .unwrap_or_else(|| Arc::new(AtomicBool::new(false)))
         };
-
+        
+        let item = Item {
+            id: queue_item.id.clone(),
+            url: queue_item.url.clone(),
+            title: queue_item.title.clone(),
+            from_playlist: false,
+            status: "Starting...".to_string(),
+        };
+        
+        {
+            let mut items = state().items.lock().unwrap();
+            let mut order = state().order.lock().unwrap();
+            let mut steps = state().steps.lock().unwrap();
+            let mut flags = state().cancel_flags.lock().unwrap();
+            
+            items.insert(item.id.clone(), item.clone());
+            order.push(item.id.clone());
+            steps.insert(item.id.clone(), fresh_steps());
+            flags.insert(item.id.clone(), Arc::new(AtomicBool::new(false)));
+        }
+        
         if cancel.load(Ordering::Relaxed) {
             set_status(&item, "Cancelled");
             record_history(&item);
+            if is_large {
+                *state().active_large_downloads.lock().unwrap() -= 1;
+            }
+            state().queue_organizer.mark_completed(&queue_item.id, 0).ok();
             continue;
         }
-
+        
         gate_acquire().await;
         process_item(&item, cancel).await;
         gate_release();
-
+        
+        if is_large {
+            *state().active_large_downloads.lock().unwrap() -= 1;
+        }
+        
         if item.status == "Completed" {
+            state().queue_organizer.mark_completed(&queue_item.id, 0).ok();
             tokio::spawn(auto_remove_after_delay(
                 item.id.clone(),
                 config().auto_remove_delay_seconds,
             ));
         } else {
+            state().queue_organizer.requeue_failed(&queue_item.id, &item.status).ok();
             persist_now();
         }
     }
@@ -560,7 +612,7 @@ fn cleanup_workspace() -> usize {
 
 fn load_state() {
     let s = state();
-    match db::load_items(&s.db) {
+    match s.db.load_items() {
         Ok(items) => {
             let mut items_map = s.items.lock().unwrap();
             let mut order = s.order.lock().unwrap();
@@ -578,7 +630,7 @@ fn load_state() {
         }
         Err(e) => error!("Failed to load queue, starting with an empty queue: {e}"),
     }
-    match db::load_history(&s.db) {
+    match s.db.load_history(config().history_limit) {
         Ok(h) => {
             *s.history.lock().unwrap() = h;
         }
@@ -587,9 +639,9 @@ fn load_state() {
     // Restore runtime settings (concurrency, aria2, rate limit) so they
     // survive restarts -- something queue_store.json also did for nothing.
     let db_conc =
-        db::get_setting(&s.db, "concurrency", config().concurrency_default as i64) as usize;
-    let db_aria2 = db::get_setting(&s.db, "aria2_connections", config().aria2c_connections);
-    let db_rate = db::get_setting(&s.db, "rate_limit_kibs", config().default_rate_limit_kibs);
+        s.db.get_setting("concurrency", config().concurrency_default as i64) as usize;
+    let db_aria2 = s.db.get_setting("aria2_connections", config().aria2c_connections);
+    let db_rate = s.db.get_setting("rate_limit_kibs", config().default_rate_limit_kibs);
     let mut settings = s.settings.lock().unwrap();
     settings.concurrency = db_conc.clamp(1, config().concurrency_max);
     settings.aria2_connections = db_aria2.clamp(1, 32);
@@ -613,14 +665,13 @@ async fn add_to_queue(
 ) -> Json<serde_json::Value> {
     let urls = ytdlp::parse_input_urls(&req.raw_input);
     let mut added_ids = Vec::new();
+    let mut duplicates = Vec::new();
+    
     for raw_url in urls {
         let video_id = ytdlp::query_param(&raw_url, "v");
         let list_id = ytdlp::query_param(&raw_url, "list");
 
         let entries: Vec<ytdlp::Entry> = if video_id.is_some() && list_id.is_none() {
-            // Single video watch URL -- fetch metadata directly instead of
-            // expanding through list_entries (which can resolve to a
-            // different googlevideo.com stream link).
             let meta = ytdlp::fetch_metadata(&raw_url).await;
             vec![ytdlp::Entry {
                 title: meta.title,
@@ -630,7 +681,6 @@ async fn add_to_queue(
                 from_playlist: false,
             }]
         } else if list_id.is_some() {
-            // Playlist/radar URL -- expand into individual entries
             ytdlp::list_entries(&raw_url).await
         } else {
             vec![ytdlp::Entry {
@@ -642,23 +692,66 @@ async fn add_to_queue(
             }]
         };
 
-        let s = state();
-        let mut items = s.items.lock().unwrap();
-        let mut order = s.order.lock().unwrap();
-        let mut steps = s.steps.lock().unwrap();
-        let mut flags = s.cancel_flags.lock().unwrap();
         for entry in entries {
-            let item = new_item(entry.url, entry.title, entry.from_playlist);
-            items.insert(item.id.clone(), item.clone());
-            order.push(item.id.clone());
-            steps.insert(item.id.clone(), fresh_steps());
-            flags.insert(item.id.clone(), Arc::new(AtomicBool::new(false)));
-            added_ids.push(item.id);
+            let music_meta = extract_metadata_from_ytdlp(&entry, entry.duration);
+            
+            let meta = queue_organizer::ItemMetadata {
+                duration: music_meta.duration,
+                bitrate: None,
+                sample_rate: None,
+                channels: None,
+                codec: Some("opus".to_string()),
+                file_size: None,
+                format_id: None,
+                is_premium: true,
+                quality_score: None,
+            };
+            
+            let quality_report = state().queue_organizer.quality_analyzer.analyze(&meta);
+            
+            let queue_item = QueueItem {
+                id: uuid::Uuid::new_v4().simple().to_string()[..8].to_string(),
+                url: entry.url.clone(),
+                title: entry.title.clone(),
+                artist: Some(entry.uploader.clone()),
+                priority: 0,
+                status: "pending".to_string(),
+                estimated_size: estimate_file_size(&music_meta),
+                actual_size: None,
+                retry_count: 0,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                started_at: None,
+                completed_at: None,
+                quality_score: Some(quality_report.score),
+                metadata: meta,
+            };
+            
+            match state().queue_organizer.add_item(queue_item) {
+                Ok(queue_organizer::AddResult::Added { item }) => {
+                    added_ids.push(item.id);
+                }
+                Ok(queue_organizer::AddResult::Duplicate { existing_id, fingerprint }) => {
+                    duplicates.push(json!({"id": existing_id, "fingerprint": fingerprint}));
+                }
+                Err(e) => {
+                    warn!("Failed to add item to queue: {}", e);
+                }
+            }
         }
     }
-    info!("Added {} item(s) to queue", added_ids.len());
+    info!("Added {} item(s) to queue, {} duplicates skipped", added_ids.len(), duplicates.len());
     persist_now();
-    Json(json!({"message": format!("Added {} item(s)", added_ids.len()), "ids": added_ids}))
+    Json(json!({
+        "message": format!("Added {} item(s)", added_ids.len()),
+        "ids": added_ids,
+        "duplicates": duplicates
+    }))
+}
+
+fn estimate_file_size(meta: &MusicMetadata) -> i64 {
+    let duration = meta.duration.unwrap_or(240.0);
+    let bitrate = if meta.is_long_form { 128 } else { 256 };
+    ((duration * bitrate as f64 * 1000.0 / 8.0) as i64).max(1_000_000)
 }
 
 #[derive(Deserialize)]
@@ -722,8 +815,11 @@ fn record_library(
         size_bytes: size_bytes as i64,
         path: final_path.display().to_string(),
         downloaded_at: iso_now(),
+        sample_rate: None,
+        channels: None,
+        bit_depth: None,
     };
-    db::insert_song(&state().db, &song);
+    state().db.insert_song(&song);
 }
 
 async fn get_history() -> Json<serde_json::Value> {
@@ -905,19 +1001,19 @@ async fn update_settings(Json(req): Json<SettingsRequest>) -> Json<serde_json::V
         let mut settings = s.settings.lock().unwrap();
         if let Some(c) = req.concurrency {
             settings.concurrency = c.clamp(1, config().concurrency_max);
-            db::save_setting(&s.db, "concurrency", settings.concurrency as i64);
+            s.db.save_setting("concurrency", settings.concurrency as i64);
         }
         if let Some(a) = req.aria2_connections {
             settings.aria2_connections = a.clamp(1, 32);
-            db::save_setting(&s.db, "aria2_connections", a);
+            s.db.save_setting("aria2_connections", a);
         }
         if let Some(r) = req.rate_limit_kibs {
             settings.rate_limit_kibs = r.clamp(0, 1024 * 1024);
-            db::save_setting(&s.db, "rate_limit_kibs", r);
+            s.db.save_setting("rate_limit_kibs", r);
         }
         if let Some(t) = req.thumbnail_max_dimension {
             settings.thumbnail_max_dimension = t.clamp(80, 4096);
-            db::save_setting(&s.db, "thumbnail_max_dimension", t);
+            s.db.save_setting("thumbnail_max_dimension", t);
         }
         (
             settings.concurrency,
@@ -957,7 +1053,7 @@ async fn get_quality(Query(q): Query<QualityQ>) -> Json<serde_json::Value> {
 }
 
 async fn get_songs() -> Json<serde_json::Value> {
-    let (songs, total, total_bytes) = db::list_songs(&state().db);
+    let (songs, total, total_bytes) = state().db.list_songs().unwrap_or((vec![], 0, 0));
     Json(json!({
         "songs": songs,
         "total": total,
@@ -979,8 +1075,8 @@ async fn cli_songs() {
     };
     let (songs, total, total_bytes) = {
         // Reuse the shared helpers through a temporary handle.
-        let database = db::Db(Mutex::new(connect));
-        db::list_songs(&database)
+        let database = Db::new(DbConfig { path: config().queue_db_path.clone(), ..Default::default() }).unwrap();
+        database.list_songs().unwrap_or((vec![], 0, 0))
     };
     if total == 0 {
         println!("library is empty");
@@ -1057,31 +1153,39 @@ async fn cli_phone_scan(device_id: Option<String>, max_bitrate: Option<i32>, dry
 
     log::init(&config().log_file);
     cleanup_existing_mess();
-    match db::init(&config().queue_db_path) {
-        Ok(db) => {
-            let _ = STATE.set(Arc::new(AppState {
-                db,
-                items: Mutex::new(FxHashMap::default()),
-                order: Mutex::new(Vec::new()),
-                history: Mutex::new(Vec::new()),
-                steps: Mutex::new(FxHashMap::default()),
-                cancel_flags: Mutex::new(FxHashMap::default()),
-                settings: Mutex::new(Settings {
-                    concurrency: config()
-                        .concurrency_default
-                        .clamp(1, config().concurrency_max),
-                    aria2_connections: config().aria2c_connections.clamp(1, 32),
-                    rate_limit_kibs: config().default_rate_limit_kibs.clamp(0, 1024 * 1024),
-                    thumbnail_max_dimension: config().thumbnail_max_dimension.clamp(80, 4096),
-                }),
-                active_downloads: Mutex::new(0),
-            }));
-        }
-        Err(e) => {
-            eprintln!("FATAL: could not init queue.db: {e:#}");
-            std::process::exit(1);
-        }
-    }
+    let db_config = DbConfig {
+        path: config().queue_db_path.clone(),
+        busy_timeout_ms: 5000,
+        wal_mode: true,
+        synchronous: db::SynchronousMode::Normal,
+        cache_size_kib: -32768,
+        mmap_size_mib: 256,
+        page_size: 4096,
+        temp_store: db::TempStore::Memory,
+    };
+    let db = Db::new(db_config).expect("Failed to create DB");
+    let organizer_config = OrganizerConfig::default();
+    let queue_organizer = QueueOrganizer::new(organizer_config);
+    
+    let _ = STATE.set(Arc::new(AppState {
+        db,
+        queue_organizer,
+        items: Mutex::new(FxHashMap::default()),
+        order: Mutex::new(Vec::new()),
+        history: Mutex::new(Vec::new()),
+        steps: Mutex::new(FxHashMap::default()),
+        cancel_flags: Mutex::new(FxHashMap::default()),
+        settings: Mutex::new(Settings {
+            concurrency: config()
+                .concurrency_default
+                .clamp(1, config().concurrency_max),
+            aria2_connections: config().aria2c_connections.clamp(1, 32),
+            rate_limit_kibs: config().default_rate_limit_kibs.clamp(0, 1024 * 1024),
+            thumbnail_max_dimension: config().thumbnail_max_dimension.clamp(80, 4096),
+        }),
+        active_downloads: Mutex::new(0),
+        active_large_downloads: Mutex::new(0),
+    }));
 
     println!("\nSearching and queuing {} songs for re-download...", low_bitrate.len());
     
@@ -1144,31 +1248,39 @@ async fn cli_queue_from_file(file_path: String) {
     log::init(&config().log_file);
 
     cleanup_existing_mess();
-    match db::init(&config().queue_db_path) {
-        Ok(db) => {
-            let _ = STATE.set(Arc::new(AppState {
-                db,
-                items: Mutex::new(FxHashMap::default()),
-                order: Mutex::new(Vec::new()),
-                history: Mutex::new(Vec::new()),
-                steps: Mutex::new(FxHashMap::default()),
-                cancel_flags: Mutex::new(FxHashMap::default()),
-                settings: Mutex::new(Settings {
-                    concurrency: config()
-                        .concurrency_default
-                        .clamp(1, config().concurrency_max),
-                    aria2_connections: config().aria2c_connections.clamp(1, 32),
-                    rate_limit_kibs: config().default_rate_limit_kibs.clamp(0, 1024 * 1024),
-                    thumbnail_max_dimension: config().thumbnail_max_dimension.clamp(80, 4096),
-                }),
-                active_downloads: Mutex::new(0),
-            }));
-        }
-        Err(e) => {
-            eprintln!("FATAL: could not init queue.db: {e:#}");
-            std::process::exit(1);
-        }
-    }
+    let db_config = DbConfig {
+        path: config().queue_db_path.clone(),
+        busy_timeout_ms: 5000,
+        wal_mode: true,
+        synchronous: db::SynchronousMode::Normal,
+        cache_size_kib: -32768,
+        mmap_size_mib: 256,
+        page_size: 4096,
+        temp_store: db::TempStore::Memory,
+    };
+    let db = Db::new(db_config).expect("Failed to create DB");
+    let organizer_config = OrganizerConfig::default();
+    let queue_organizer = QueueOrganizer::new(organizer_config);
+    
+    let _ = STATE.set(Arc::new(AppState {
+        db,
+        queue_organizer,
+        items: Mutex::new(FxHashMap::default()),
+        order: Mutex::new(Vec::new()),
+        history: Mutex::new(Vec::new()),
+        steps: Mutex::new(FxHashMap::default()),
+        cancel_flags: Mutex::new(FxHashMap::default()),
+        settings: Mutex::new(Settings {
+            concurrency: config()
+                .concurrency_default
+                .clamp(1, config().concurrency_max),
+            aria2_connections: config().aria2c_connections.clamp(1, 32),
+            rate_limit_kibs: config().default_rate_limit_kibs.clamp(0, 1024 * 1024),
+            thumbnail_max_dimension: config().thumbnail_max_dimension.clamp(80, 4096),
+        }),
+        active_downloads: Mutex::new(0),
+        active_large_downloads: Mutex::new(0),
+    }));
 
     let content = std::fs::read_to_string(&file_path).expect("Failed to read file");
     let video_ids: Vec<String> = content
@@ -1281,31 +1393,50 @@ async fn main() {
     log::init(&config().log_file);
 
     cleanup_existing_mess();
-    match db::init(&config().queue_db_path) {
-        Ok(db) => {
-            let _ = STATE.set(Arc::new(AppState {
-                db,
-                items: Mutex::new(FxHashMap::default()),
-                order: Mutex::new(Vec::new()),
-                history: Mutex::new(Vec::new()),
-                steps: Mutex::new(FxHashMap::default()),
-                cancel_flags: Mutex::new(FxHashMap::default()),
-                settings: Mutex::new(Settings {
-                    concurrency: config()
-                        .concurrency_default
-                        .clamp(1, config().concurrency_max),
-                    aria2_connections: config().aria2c_connections.clamp(1, 32),
-                    rate_limit_kibs: config().default_rate_limit_kibs.clamp(0, 1024 * 1024),
-                    thumbnail_max_dimension: config().thumbnail_max_dimension.clamp(80, 4096),
-                }),
-                active_downloads: Mutex::new(0),
-            }));
-        }
-        Err(e) => {
-            eprintln!("FATAL: could not init queue.db: {e:#}");
-            std::process::exit(1);
-        }
-    }
+    
+    let db_config = DbConfig {
+        path: config().queue_db_path.clone(),
+        busy_timeout_ms: 5000,
+        wal_mode: true,
+        synchronous: db::SynchronousMode::Normal,
+        cache_size_kib: -32768,
+        mmap_size_mib: 256,
+        page_size: 4096,
+        temp_store: db::TempStore::Memory,
+    };
+    
+    let db = Db::new(db_config).expect("Failed to create DB");
+    
+    let organizer_config = OrganizerConfig {
+        max_queue_size: 10000,
+        priority_boost_large: 1000,
+        priority_penalty_retry: -500,
+        dedup_threshold: 0.85,
+        min_quality_score: 0.3,
+        max_concurrent_large: config().concurrency_max / 2,
+        large_threshold_bytes: 10 * 1024 * 1024,
+    };
+    let queue_organizer = QueueOrganizer::new(organizer_config);
+    
+    let _ = STATE.set(Arc::new(AppState {
+        db,
+        queue_organizer,
+        items: Mutex::new(FxHashMap::default()),
+        order: Mutex::new(Vec::new()),
+        history: Mutex::new(Vec::new()),
+        steps: Mutex::new(FxHashMap::default()),
+        cancel_flags: Mutex::new(FxHashMap::default()),
+        settings: Mutex::new(Settings {
+            concurrency: config()
+                .concurrency_default
+                .clamp(1, config().concurrency_max),
+            aria2_connections: config().aria2c_connections.clamp(1, 32),
+            rate_limit_kibs: config().default_rate_limit_kibs.clamp(0, 1024 * 1024),
+            thumbnail_max_dimension: config().thumbnail_max_dimension.clamp(80, 4096),
+        }),
+        active_downloads: Mutex::new(0),
+        active_large_downloads: Mutex::new(0),
+    }));
 
     let _ = std::fs::create_dir_all(&config().songs_archive_dir);
     let _ = std::fs::create_dir_all(&config().temp_workspace_dir);
@@ -1314,6 +1445,15 @@ async fn main() {
     for _ in 0..config().concurrency_max {
         tokio::spawn(worker());
     }
+    
+    tokio::spawn(async {
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            state().queue_organizer.rebalance_priorities();
+        }
+    });
+    
     tokio::spawn(async {
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
