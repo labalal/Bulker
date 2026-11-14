@@ -1,0 +1,17 @@
+[plugin]
+id = "plex_sync"
+name = "Plex Media Sync"
+version = "1.0.0"
+description = "Sync music library with Plex Media Server"
+author = "Bulker Team"
+repository = "https://github.com/bulker/plex-sync-plugin"
+license = "MIT"
+
+[source]
+type = "local"
+path = "./plex_sync_plugin"
+
+[config]
+server_url = "http://localhost:32400"
+token = ""
+library_section = "Music"

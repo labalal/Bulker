@@ -1,0 +1,19 @@
+[plugin]
+id = "spotify_sync"
+name = "Spotify Sync"
+version = "1.0.0"
+description = "Sync downloaded tracks to Spotify playlists"
+author = "Bulker Team"
+repository = "https://github.com/bulker/spotify-sync-plugin"
+license = "MIT"
+
+[source]
+type = "git"
+url = "https://github.com/bulker/spotify-sync-plugin.git"
+branch = "main"
+
+[config]
+client_id = ""
+client_secret = ""
+redirect_uri = "http://localhost:8080/callback"
+default_playlist = "Bulker Downloads"

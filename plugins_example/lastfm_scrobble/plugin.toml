@@ -1,0 +1,17 @@
+[plugin]
+id = "lastfm_scrobble"
+name = "Last.fm Scrobbler"
+version = "1.0.0"
+description = "Scrobble played tracks to Last.fm"
+author = "Bulker Team"
+repository = "https://github.com/bulker/lastfm-scrobble-plugin"
+license = "MIT"
+
+[source]
+type = "builtin"
+name = "lastfm_scrobble"
+
+[config]
+api_key = ""
+api_secret = ""
+username = ""
