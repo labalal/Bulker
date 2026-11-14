@@ -2,12 +2,52 @@ use anyhow::{Context, Result};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-static ARTIST_ALIASES: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static ARTIST_ALIASES: Lazy<Mutex<FxHashMap<String, String>>> = Lazy::new(|| Mutex::new(FxHashMap::default()));
 static KNOWN_ARTISTS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+static ARTIST_CLEAN_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
+    let patterns = [
+        r"(?i)\s*\(official.*?\)",
+        r"(?i)\s*\[official.*?\]",
+        r"(?i)\s*\(music video\)",
+        r"(?i)\s*\[music video\]",
+        r"(?i)\s*\(lyric.*?\)",
+        r"(?i)\s*\[lyric.*?\]",
+        r"(?i)\s*\(audio\)",
+        r"(?i)\s*\[audio\]",
+        r"(?i)\s*\(visualizer\)",
+        r"(?i)\s*\[visualizer\]",
+        r"(?i)\s*\(live.*?\)",
+        r"(?i)\s*\[live.*?\]",
+        r"(?i)\s*\(remix.*?\)",
+        r"(?i)\s*\[remix.*?\]",
+        r"(?i)\s*\(cover.*?\)",
+        r"(?i)\s*\[cover.*?\]",
+        r"(?i)\s*\(slowed.*?\)",
+        r"(?i)\s*\[slowed.*?\]",
+        r"(?i)\s*\(sped up.*?\)",
+        r"(?i)\s*\[sped up.*?\]",
+        r"(?i)\s*\(reverb.*?\)",
+        r"(?i)\s*\[reverb.*?\]",
+        r"(?i)\s*\(8d.*?\)",
+        r"(?i)\s*\[8d.*?\]",
+        r"(?i)\s*feat\..*",
+        r"(?i)\s*ft\..*",
+        r"(?i)\s*featuring.*",
+        r"(?i)\s*with.*",
+        r"(?i)\s*x\s+.*",
+        r"(?i)\s*vs\..*",
+        r"(?i)\s*presents?.*",
+        r"(?i)\s*pres\..*",
+        r"\s*[\[\(].*?[\]\)]\s*$",
+        r"\s{2,}",
+    ];
+    patterns.iter().map(|p| Regex::new(p).expect("valid regex")).collect()
+});
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MusicMetadata {
@@ -31,7 +71,7 @@ pub struct MusicOrganizer {
     base_dir: PathBuf,
     long_form_threshold_secs: f64,
     use_musicbrainz: bool,
-    musicbrainz_cache: Mutex<HashMap<String, MusicBrainzArtist>>,
+    musicbrainz_cache: Mutex<FxHashMap<String, MusicBrainzArtist>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,7 +103,7 @@ impl MusicOrganizer {
             base_dir,
             long_form_threshold_secs: 30.0 * 60.0,
             use_musicbrainz: true,
-            musicbrainz_cache: Mutex::new(HashMap::new()),
+            musicbrainz_cache: Mutex::new(FxHashMap::default()),
         }
     }
 
@@ -135,45 +175,7 @@ impl MusicOrganizer {
     fn clean_artist_name(&self, raw: &str) -> String {
         let mut cleaned = raw.trim().to_string();
         
-        let patterns = [
-            r"(?i)\s*\(official.*?\)",
-            r"(?i)\s*\[official.*?\]",
-            r"(?i)\s*\(music video\)",
-            r"(?i)\s*\[music video\]",
-            r"(?i)\s*\(lyric.*?\)",
-            r"(?i)\s*\[lyric.*?\]",
-            r"(?i)\s*\(audio\)",
-            r"(?i)\s*\[audio\]",
-            r"(?i)\s*\(visualizer\)",
-            r"(?i)\s*\[visualizer\]",
-            r"(?i)\s*\(live.*?\)",
-            r"(?i)\s*\[live.*?\]",
-            r"(?i)\s*\(remix.*?\)",
-            r"(?i)\s*\[remix.*?\]",
-            r"(?i)\s*\(cover.*?\)",
-            r"(?i)\s*\[cover.*?\]",
-            r"(?i)\s*\(slowed.*?\)",
-            r"(?i)\s*\[slowed.*?\]",
-            r"(?i)\s*\(sped up.*?\)",
-            r"(?i)\s*\[sped up.*?\]",
-            r"(?i)\s*\(reverb.*?\)",
-            r"(?i)\s*\[reverb.*?\]",
-            r"(?i)\s*\(8d.*?\)",
-            r"(?i)\s*\[8d.*?\]",
-            r"(?i)\s*feat\..*",
-            r"(?i)\s*ft\..*",
-            r"(?i)\s*featuring.*",
-            r"(?i)\s*with.*",
-            r"(?i)\s*x\s+.*",
-            r"(?i)\s*vs\..*",
-            r"(?i)\s*presents?.*",
-            r"(?i)\s*pres\..*",
-            r"\s*[\[\(].*?[\]\)]\s*$",
-            r"\s{2,}",
-        ];
-
-        for pattern in patterns {
-            let re = Regex::new(pattern).unwrap();
+        for re in ARTIST_CLEAN_PATTERNS.iter() {
             cleaned = re.replace_all(&cleaned, "").to_string();
         }
 

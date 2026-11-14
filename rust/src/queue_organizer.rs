@@ -1,14 +1,14 @@
-use anyhow::{Context, Result};
-use dashmap::DashMap;
+use anyhow::Result;
 use parking_lot::RwLock;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use rustc_hash::FxHashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Instant;
+use once_cell::sync::Lazy;
 
 /// Queue organizer with priority-based scheduling, deduplication, and quality analysis
 pub struct QueueOrganizer {
     priority_index: Arc<RwLock<BTreeMap<i64, Vec<String>>>>,
-    pending_items: Arc<DashMap<String, QueueItem>>,
+    pending_items: Arc<RwLock<FxHashMap<String, QueueItem>>>,
     fingerprints: Arc<RwLock<PrefixTrie>>,
     pub quality_analyzer: QualityAnalyzer,
     pub config: OrganizerConfig,
@@ -175,7 +175,7 @@ struct PrefixTrie {
 
 #[derive(Clone, Debug, Default)]
 struct TrieNode {
-    children: HashMap<char, TrieNode>,
+    children: FxHashMap<char, TrieNode>,
     video_ids: Vec<String>,
     is_terminal: bool,
 }
@@ -265,7 +265,7 @@ impl QueueOrganizer {
     pub fn new(config: OrganizerConfig) -> Self {
         Self {
             priority_index: Arc::new(RwLock::new(BTreeMap::new())),
-            pending_items: Arc::new(DashMap::new()),
+            pending_items: Arc::new(RwLock::new(FxHashMap::default())),
             fingerprints: Arc::new(RwLock::new(PrefixTrie::new())),
             quality_analyzer: QualityAnalyzer::new(),
             config,
@@ -282,7 +282,7 @@ impl QueueOrganizer {
         
         self.calculate_priority(&mut item);
         
-        self.pending_items.insert(item.id.clone(), item.clone());
+        self.pending_items.write().insert(item.id.clone(), item.clone());
         
         self.priority_index.write().entry(item.priority)
             .or_default()
@@ -305,7 +305,7 @@ impl QueueOrganizer {
         
         for (existing_id, similarity) in similar {
             if similarity >= self.config.dedup_threshold {
-                if let Some(existing) = self.pending_items.get(&existing_id) {
+                if let Some(existing) = self.pending_items.read().get(&existing_id) {
                     let quality_cmp = self.quality_analyzer.compare_quality(&existing.metadata, &item.metadata);
                     if quality_cmp == std::cmp::Ordering::Greater || quality_cmp == std::cmp::Ordering::Equal {
                         return Some(existing_id);
@@ -368,7 +368,7 @@ impl QueueOrganizer {
                 let mut i = 0;
                 while i < ids.len() && result.len() < count {
                     let id = &ids[i];
-                    if let Some(item) = self.pending_items.get(id) {
+                    if let Some(item) = self.pending_items.read().get(id) {
                         let is_large = item.estimated_size > self.config.large_threshold_bytes;
                         
                         if is_large && large_count >= max_large {
@@ -381,7 +381,7 @@ impl QueueOrganizer {
                             item_clone.status = "scheduled".to_string();
                             item_clone.started_at = Some(chrono::Utc::now().to_rfc3339());
                             
-                            self.pending_items.insert(id.clone(), item_clone.clone());
+                            self.pending_items.write().insert(id.clone(), item_clone.clone());
                             result.push(item_clone);
                             
                             if is_large {
@@ -402,7 +402,7 @@ impl QueueOrganizer {
     }
     
     pub fn requeue_failed(&self, id: &str, _error: &str) -> Result<()> {
-        if let Some(mut item) = self.pending_items.get_mut(id) {
+        if let Some(mut item) = self.pending_items.write().get_mut(id) {
             item.retry_count += 1;
             item.status = "pending".to_string();
             item.started_at = None;
@@ -422,7 +422,7 @@ impl QueueOrganizer {
     }
     
     pub fn mark_completed(&self, id: &str, actual_size: i64) -> Result<()> {
-        if let Some(mut item) = self.pending_items.get_mut(id) {
+        if let Some(item) = self.pending_items.write().get_mut(id) {
             item.status = "completed".to_string();
             item.completed_at = Some(chrono::Utc::now().to_rfc3339());
             item.actual_size = Some(actual_size);
@@ -435,10 +435,10 @@ impl QueueOrganizer {
     }
     
     pub fn get_stats(&self) -> OrganizerStats {
-        let pending = self.pending_items.len();
-        let by_status = self.pending_items.iter()
-            .fold(HashMap::new(), |mut acc, item| {
-                *acc.entry(item.status.clone()).or_insert(0) += 1;
+        let pending = self.pending_items.read().len();
+        let by_status = self.pending_items.read().iter()
+            .fold(FxHashMap::default(), |mut acc, item| {
+                *acc.entry(item.1.status.clone()).or_insert(0) += 1;
                 acc
             });
         
@@ -451,15 +451,15 @@ impl QueueOrganizer {
     }
     
     pub fn rebalance_priorities(&self) {
-        let items: Vec<_> = self.pending_items.iter()
-            .filter(|i| i.status == "pending" || i.status == "scheduled")
-            .map(|i| i.key().clone())
+        let items: Vec<_> = self.pending_items.read().iter()
+            .filter(|i| i.1.status == "pending" || i.1.status == "scheduled")
+            .map(|i| i.0.clone())
             .collect();
         
         for id in items {
-            if let Some(mut item) = self.pending_items.get_mut(&id) {
+            if let Some(item) = self.pending_items.write().get_mut(&id) {
                 let old_priority = item.priority;
-                self.calculate_priority(&mut item);
+                self.calculate_priority(item);
                 
                 if old_priority != item.priority {
                     if let Some(pos) = self.priority_index.write().get_mut(&old_priority) {
@@ -483,14 +483,12 @@ pub enum AddResult {
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct OrganizerStats {
     pub total_pending: usize,
-    pub by_status: HashMap<String, usize>,
+    pub by_status: FxHashMap<String, usize>,
     pub priority_levels: usize,
     pub fingerprint_count: usize,
 }
 
-fn normalize_for_matching(s: &str) -> String {
-    let mut normalized = s.to_lowercase();
-    
+static NORMALIZE_PATTERNS: Lazy<Vec<regex::Regex>> = Lazy::new(|| {
     let patterns = [
         r"\(official.*?\)",
         r"\[official.*?\]",
@@ -527,9 +525,13 @@ fn normalize_for_matching(s: &str) -> String {
         r"[\[\(].*?[\]\)]",
         r"\s+",
     ];
+    patterns.iter().map(|p| regex::Regex::new(p).expect("valid regex")).collect()
+});
+
+fn normalize_for_matching(s: &str) -> String {
+    let mut normalized = s.to_lowercase();
     
-    for pattern in patterns {
-        let re = regex::Regex::new(pattern).unwrap();
+    for re in NORMALIZE_PATTERNS.iter() {
         normalized = re.replace_all(&normalized, " ").to_string();
     }
     

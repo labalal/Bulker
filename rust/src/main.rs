@@ -16,6 +16,7 @@ mod db;
 mod log;
 mod organizer;
 mod queue_organizer;
+mod sqlite;
 mod tag;
 mod tui;
 mod ytdlp;
@@ -1155,13 +1156,13 @@ async fn cli_phone_scan(device_id: Option<String>, max_bitrate: Option<i32>, dry
     cleanup_existing_mess();
     let db_config = DbConfig {
         path: config().queue_db_path.clone(),
+        pool_size: config().concurrency_max * 2,
         busy_timeout_ms: 5000,
         wal_mode: true,
-        synchronous: db::SynchronousMode::Normal,
         cache_size_kib: -32768,
         mmap_size_mib: 256,
         page_size: 4096,
-        temp_store: db::TempStore::Memory,
+        temp_store: crate::sqlite::TempStore::Memory,
     };
     let db = Db::new(db_config).expect("Failed to create DB");
     let organizer_config = OrganizerConfig::default();
@@ -1250,13 +1251,13 @@ async fn cli_queue_from_file(file_path: String) {
     cleanup_existing_mess();
     let db_config = DbConfig {
         path: config().queue_db_path.clone(),
+        pool_size: config().concurrency_max * 2,
         busy_timeout_ms: 5000,
         wal_mode: true,
-        synchronous: db::SynchronousMode::Normal,
         cache_size_kib: -32768,
         mmap_size_mib: 256,
         page_size: 4096,
-        temp_store: db::TempStore::Memory,
+        temp_store: crate::sqlite::TempStore::Memory,
     };
     let db = Db::new(db_config).expect("Failed to create DB");
     let organizer_config = OrganizerConfig::default();
@@ -1396,13 +1397,13 @@ async fn main() {
     
     let db_config = DbConfig {
         path: config().queue_db_path.clone(),
+        pool_size: config().concurrency_max * 2,
         busy_timeout_ms: 5000,
         wal_mode: true,
-        synchronous: db::SynchronousMode::Normal,
         cache_size_kib: -32768,
         mmap_size_mib: 256,
         page_size: 4096,
-        temp_store: db::TempStore::Memory,
+        temp_store: crate::sqlite::TempStore::Memory,
     };
     
     let db = Db::new(db_config).expect("Failed to create DB");
