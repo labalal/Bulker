@@ -16,6 +16,7 @@ mod db;
 mod log;
 mod organizer;
 pub mod page_cache;
+mod perf;
 pub mod plugin;
 mod queue_organizer;
 pub mod security;

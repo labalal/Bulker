@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::process::Command;
+use rayon::prelude::*;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ScannedSong {
@@ -67,21 +68,23 @@ impl AdbScanner {
             "/mnt/media_rw",
         ];
 
-        let mut all_songs = Vec::new();
-
-        for dir in music_dirs {
-            match self.scan_directory(dir) {
-                Ok(songs) => {
-                    println!("Found {} songs in {}", songs.len(), dir);
-                    all_songs.extend(songs);
+        let results: Vec<_> = music_dirs.par_iter()
+            .filter_map(|dir| {
+                match self.scan_directory(dir) {
+                    Ok(songs) => {
+                        println!("Found {} songs in {}", songs.len(), dir);
+                        Some(songs)
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Could not scan {}: {}", dir, e);
+                        None
+                    }
                 }
-                Err(e) => {
-                    eprintln!("Warning: Could not scan {}: {}", dir, e);
-                }
-            }
-        }
+            })
+            .flatten()
+            .collect();
 
-        Ok(all_songs)
+        Ok(results)
     }
 
     fn scan_directory(&self, dir: &str) -> Result<Vec<ScannedSong>> {

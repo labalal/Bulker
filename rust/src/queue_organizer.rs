@@ -4,6 +4,7 @@ use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use once_cell::sync::Lazy;
+use crate::perf::{TtlLruCache, quality_cache, fast_path};
 
 /// Queue organizer with priority-based scheduling, deduplication, and quality analysis
 pub struct QueueOrganizer {
@@ -12,6 +13,7 @@ pub struct QueueOrganizer {
     fingerprints: Arc<RwLock<PrefixTrie>>,
     pub quality_analyzer: QualityAnalyzer,
     pub config: OrganizerConfig,
+    quality_cache: Arc<crate::perf::TtlLruCache<String, QualityReport>>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -269,12 +271,24 @@ impl QueueOrganizer {
             fingerprints: Arc::new(RwLock::new(PrefixTrie::new())),
             quality_analyzer: QualityAnalyzer::new(),
             config,
+            quality_cache: Arc::new(crate::perf::TtlLruCache::new(10000, std::time::Duration::from_secs(3600))),
         }
     }
     
     pub fn add_item(&self, mut item: QueueItem) -> Result<AddResult> {
         let fingerprint = self.generate_fingerprint(&item);
-        item.metadata.quality_score = Some(self.quality_analyzer.analyze(&item.metadata).score);
+        
+        // Use cached quality analysis
+        let cache_key = format!("{}|{}", item.metadata.bitrate.unwrap_or(0), item.metadata.is_premium);
+        let quality_report = if let Some(cached) = self.quality_cache.get(&cache_key) {
+            cached
+        } else {
+            let report = self.quality_analyzer.analyze(&item.metadata);
+            self.quality_cache.put(cache_key, report.clone());
+            report
+        };
+        
+        item.metadata.quality_score = Some(quality_report.score);
         
         if let Some(existing_id) = self.check_duplicate(&fingerprint, &item) {
             return Ok(AddResult::Duplicate { existing_id, fingerprint });

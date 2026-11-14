@@ -1,0 +1,70 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "lsp": {
+    "rust": {
+      "command": ["rust-analyzer"],
+      "extensions": [".rs"],
+      "disabled": false,
+      "initialization": {
+        "cargo": {
+          "manifestPath": "rust/Cargo.toml",
+          "allFeatures": true
+        },
+        "checkOnSave": {
+          "command": "clippy"
+        },
+        "procMacro": {
+          "enable": true
+        },
+        "inlayHints": {
+          "enable": true
+        }
+      }
+    },
+    "html": {
+      "command": ["vscode-html-language-server", "--stdio"],
+      "extensions": [".html", ".htm"],
+      "disabled": false
+    },
+    "css": {
+      "command": ["vscode-css-language-server", "--stdio"],
+      "extensions": [".css", ".scss", ".less"],
+      "disabled": false
+    },
+    "javascript": {
+      "command": ["typescript-language-server", "--stdio"],
+      "extensions": [".js", ".jsx", ".mjs", ".cjs"],
+      "disabled": false
+    },
+    "toml": {
+      "command": ["taplo", "lsp", "stdio"],
+      "extensions": [".toml"],
+      "disabled": false
+    },
+    "lua": {
+      "command": ["lua-language-server"],
+      "extensions": [".lua"],
+      "disabled": false
+    },
+    "shell": {
+      "command": ["bash-language-server", "start"],
+      "extensions": [".sh", ".bash", ".zsh"],
+      "disabled": false
+    },
+    "gitcommit": {
+      "command": ["commitlint-language-server", "--stdio"],
+      "extensions": [".gitcommit", "COMMIT_EDITMSG"],
+      "disabled": false
+    },
+    "json": {
+      "command": ["vscode-json-language-server", "--stdio"],
+      "extensions": [".json", ".jsonc"],
+      "disabled": false
+    },
+    "sql": {
+      "command": ["sqls"],
+      "extensions": [".sql"],
+      "disabled": false
+    }
+  }
+}

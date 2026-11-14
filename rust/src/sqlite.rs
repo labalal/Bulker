@@ -204,6 +204,30 @@ impl Sqlite {
         tx.commit().context("failed to commit transaction")?;
         Ok(result)
     }
+    
+    /// Batch insert multiple rows in a single transaction for high throughput.
+    pub fn batch_insert<T>(&self, sql: &str, items: &[T], params_fn: impl Fn(&T) -> Vec<&dyn rusqlite::ToSql>) -> Result<usize> {
+        if items.is_empty() {
+            return Ok(0);
+        }
+        
+        let mut conn = self.get_conn()?;
+        let tx = conn.raw_conn_mut().transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to start immediate transaction")?;
+        
+        let mut stmt = tx.prepare(sql).context("preparing batch statement")?;
+        let mut count = 0;
+        
+        for item in items {
+            let params = params_fn(item);
+            stmt.execute(&*params).context("executing batch insert")?;
+            count += 1;
+        }
+        
+        drop(stmt);
+        tx.commit().context("failed to commit batch transaction")?;
+        Ok(count)
+    }
 }
 
 pub struct PooledConn {

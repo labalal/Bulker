@@ -8,3 +8,4 @@ description = "ADB-based Android phone music scanner for Bulker"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
+rayon = "1.10"
