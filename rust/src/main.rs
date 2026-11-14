@@ -1389,10 +1389,25 @@ async fn cli_archive_tui() {
             for item in &selected {
                 println!("  {} - {} ({})", item.artist, item.title, item.path.display());
             }
-            // TODO: Add actions for selected items (delete, move, export)
         }
         Err(e) => {
             eprintln!("TUI error: {}", e);
+        }
+    }
+}
+
+async fn cli_plugin_tui() {
+    config::init();
+    let plugin_dir = PathBuf::from(&config().plugins_dir);
+    let config_dir = PathBuf::from(&config().config_dir);
+    
+    println!("Scanning plugin directory: {}", plugin_dir.display());
+    
+    let mut tui = plugin::tui::PluginTui::new(plugin_dir, config_dir);
+    match tui.run() {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Plugin TUI error: {}", e);
         }
     }
 }
@@ -1427,6 +1442,9 @@ async fn main() {
     } else if args.len() >= 2 && args[1] == "archive-tui" {
         config::init();
         cli_archive_tui().await;
+    } else if args.len() >= 2 && args[1] == "plugin-tui" {
+        config::init();
+        cli_plugin_tui().await;
     } else if args.len() > 1 {
         eprintln!("usage: bulker-rs [check <url> | songs | phone-scan [--device ID] [--max-bitrate N] [--no-dry-run] | phone-list [--device ID] | queue-from-file <file.txt> | archive-tui]  (no args = start the server/daemon)");
         std::process::exit(2);

@@ -6,6 +6,7 @@
 
 pub mod template;
 pub mod adb_phone;
+pub mod tui;
 
 use anyhow::{bail, Result};
 use async_trait::async_trait;

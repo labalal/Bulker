@@ -40,6 +40,8 @@ pub struct Config {
     pub songs_archive_dir: String,
     pub queue_db_path: String,
     pub log_file: String,
+    pub plugins_dir: String,
+    pub config_dir: String,
     pub host: String,
     pub port: u16,
     pub aria2c_connections: i64,
@@ -113,6 +115,8 @@ pub fn init() {
     let songs_archive_dir = resolve_path("SONGS_ARCHIVE_DIR", "Songs_archive", &base);
     let queue_db_path = resolve_path("QUEUE_DB_PATH", "queue.db", &base);
     let log_file = resolve_path("LOG_FILE", "app.log", &base);
+    let plugins_dir = resolve_path("PLUGINS_DIR", "plugins", &base);
+    let config_dir = resolve_path("CONFIG_DIR", "config", &base);
 
     let _ = CONFIG.set(Config {
         cookies_file,
@@ -122,6 +126,8 @@ pub fn init() {
         songs_archive_dir,
         queue_db_path,
         log_file,
+        plugins_dir,
+        config_dir,
         host: getenv("HOST", "127.0.0.1"),
         port: getenv_num("PORT", 8000),
         aria2c_connections: getenv_num("ARIA2C_CONNECTIONS", 16),
