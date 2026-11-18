@@ -1578,25 +1578,42 @@ async fn cli_phone_scan(device_id: Option<String>, max_bitrate: Option<i32>, dry
 
 async fn cli_phone_list(device_id: Option<String>) {
     config::init();
-
+    log::init(&config().log_file);
+    
     let devices = AdbScanner::list_devices().unwrap_or_default();
     if devices.is_empty() {
         eprintln!("No ADB devices found. Enable USB debugging and connect your phone.");
         std::process::exit(1);
     }
     
-    let scanner = AdbScanner::new(device_id);
+    let target_device = device_id.unwrap_or_else(|| devices[0].clone());
+    eprintln!("Scanning device: {} ...", target_device);
+    
+    let scanner = AdbScanner::new(Some(target_device.clone()));
+    eprintln!("Scanning music directories...");
     let songs = scanner.scan_music_directories().unwrap_or_default();
     
     if songs.is_empty() {
-        println!("No music files found on device.");
+        eprintln!("No music files found on device.");
         return;
     }
-
-    println!("Found {} songs:", songs.len());
-    for song in &songs {
+    
+    eprintln!("Found {} songs, extracting metadata...", songs.len());
+    
+    let mut output = Vec::with_capacity(songs.len());
+    for (i, song) in songs.iter().enumerate() {
         let br = song.bitrate.map_or("unknown".to_string(), |b| format!("{} kbps", b));
-        println!("  [{}] {} - {} ({})", br, song.title, song.artist, song.file_path);
+        let line = format!("  [{}] {} - {} ({})", br, song.title, song.artist, song.file_path);
+        output.push(line);
+        
+        if (i + 1) % 50 == 0 {
+            eprintln!("  Processed {}/{} songs...", i + 1, songs.len());
+        }
+    }
+    
+    eprintln!("Done! Total: {} songs", songs.len());
+    for line in output {
+        println!("{}", line);
     }
 }
 

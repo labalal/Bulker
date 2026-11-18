@@ -104,6 +104,7 @@ impl AdbScanner {
         let extensions = ["opus", "mp3", "flac", "m4a", "ogg", "wav"];
         let mut all_files = Vec::new();
         
+        eprintln!("  Scanning directory: {}", dir);
         let mut cmd = self.adb_cmd(&["shell", "ls", dir])?;
         if let Ok(output) = cmd.output() {
             if output.status.success() {
@@ -122,14 +123,20 @@ impl AdbScanner {
                 }
             }
         }
-
+        
+        eprintln!("    Found {} audio files in {}", all_files.len(), dir);
+        
         let mut songs = Vec::new();
-        for file in all_files {
-            if let Ok(song) = self.extract_metadata(&file) {
+        for (i, file) in all_files.iter().enumerate() {
+            if (i + 1) % 20 == 0 {
+                eprintln!("      Extracted metadata {}/{} files in {}", i + 1, all_files.len(), dir);
+            }
+            if let Ok(song) = self.extract_metadata(file) {
                 songs.push(song);
             }
         }
-
+        
+        eprintln!("    Completed {}: {} songs with metadata", dir, songs.len());
         Ok(songs)
     }
 
