@@ -4,8 +4,7 @@ use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use once_cell::sync::Lazy;
-use crate::perf::{TtlLruCache, quality_cache, fast_path};
-
+use crate::info;
 /// Queue organizer with priority-based scheduling, deduplication, and quality analysis
 pub struct QueueOrganizer {
     priority_index: Arc<RwLock<BTreeMap<i64, Vec<String>>>>,
@@ -49,10 +48,12 @@ pub struct ItemMetadata {
 
 #[derive(Clone, Debug)]
 pub struct OrganizerConfig {
+    #[allow(dead_code)]
     pub max_queue_size: usize,
     pub priority_boost_large: i64,
     pub priority_penalty_retry: i64,
     pub dedup_threshold: f32,
+    #[allow(dead_code)]
     pub min_quality_score: f32,
     pub max_concurrent_large: usize,
     pub large_threshold_bytes: i64,
@@ -76,6 +77,7 @@ impl Default for OrganizerConfig {
 pub struct QualityAnalyzer {
     target_sample_rate: i32,
     target_bitrate: i32,
+    #[allow(dead_code)]
     target_bit_depth: i32,
 }
 
@@ -196,6 +198,7 @@ impl PrefixTrie {
         node.video_ids.push(video_id);
     }
     
+    #[allow(dead_code)]
     fn find_longest_prefix(&self, key: &str) -> Vec<String> {
         let mut node = &self.root;
         let mut best_match = Vec::new();
@@ -240,7 +243,10 @@ impl PrefixTrie {
             return;
         }
         
-        let ch = key.chars().nth(idx).unwrap();
+        let ch = match key.chars().nth(idx) {
+            Some(c) => c,
+            None => return, // idx beyond character count, safety check
+        };
         
         if let Some(child) = node.children.get(&ch) {
             self.dfs_search(child, key, idx + 1, matched + 1, key_len, threshold, results);
@@ -273,6 +279,39 @@ impl QueueOrganizer {
             config,
             quality_cache: Arc::new(crate::perf::TtlLruCache::new(10000, std::time::Duration::from_secs(3600))),
         }
+    }
+    
+    /// Load queue items from database on startup
+    pub fn load_from_db(&self, db: &crate::Db) -> Result<usize> {
+        let items = db.load_all_queue_items()?;
+        let mut loaded = 0;
+        
+        for mut item in items {
+            // Convert "Starting..." back to "pending" for re-processing
+            if item.status == "Starting..." {
+                item.status = "pending".to_string();
+                item.started_at = None;
+            }
+            
+            let fingerprint = self.generate_fingerprint(&item);
+            
+            // Recalculate priority for loaded items (age may have changed)
+            self.calculate_priority(&mut item);
+            
+            // Check for duplicates against already loaded items
+            if let Some(existing_id) = self.check_duplicate(&fingerprint, &item) {
+                info!("Skipping duplicate on load: {} (duplicate of {})", item.title, existing_id);
+                continue;
+            }
+            
+            self.pending_items.write().insert(item.id.clone(), item.clone());
+            self.priority_index.write().entry(item.priority).or_default().push(item.id.clone());
+            self.fingerprints.write().insert(&fingerprint, item.id.clone());
+            loaded += 1;
+        }
+        
+        info!("Loaded {} queued item(s) from database into QueueOrganizer", loaded);
+        Ok(loaded)
     }
     
     pub fn add_item(&self, mut item: QueueItem) -> Result<AddResult> {
@@ -370,7 +409,13 @@ impl QueueOrganizer {
         let mut large_count = 0;
         let max_large = max_large.unwrap_or(self.config.max_concurrent_large);
         
+        // Acquire pending_items first to avoid deadlock with requeue_failed/mark_completed
+        let mut pending = self.pending_items.write();
+        
+        // Now acquire priority_index
         let mut index = self.priority_index.write();
+        
+        // Collect IDs to process
         let priorities: Vec<i64> = index.keys().rev().cloned().collect();
         
         for priority in priorities {
@@ -382,7 +427,8 @@ impl QueueOrganizer {
                 let mut i = 0;
                 while i < ids.len() && result.len() < count {
                     let id = &ids[i];
-                    if let Some(item) = self.pending_items.read().get(id) {
+                    let mut processed = false;
+                    if let Some(item) = pending.get(id) {
                         let is_large = item.estimated_size > self.config.large_threshold_bytes;
                         
                         if is_large && large_count >= max_large {
@@ -395,15 +441,20 @@ impl QueueOrganizer {
                             item_clone.status = "scheduled".to_string();
                             item_clone.started_at = Some(chrono::Utc::now().to_rfc3339());
                             
-                            self.pending_items.write().insert(id.clone(), item_clone.clone());
+                            pending.insert(id.clone(), item_clone.clone());
                             result.push(item_clone);
                             
                             if is_large {
                                 large_count += 1;
                             }
+                            processed = true;
                         }
                     }
-                    ids.remove(i);
+                    if processed {
+                        ids.remove(i);
+                    } else {
+                        i += 1;
+                    }
                 }
                 
                 if ids.is_empty() {
@@ -448,6 +499,7 @@ impl QueueOrganizer {
         Ok(())
     }
     
+    #[allow(dead_code)]
     pub fn get_stats(&self) -> OrganizerStats {
         let pending = self.pending_items.read().len();
         let by_status = self.pending_items.read().iter()
@@ -495,6 +547,7 @@ pub enum AddResult {
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
+#[allow(dead_code)]
 pub struct OrganizerStats {
     pub total_pending: usize,
     pub by_status: FxHashMap<String, usize>,

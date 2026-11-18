@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use parking_lot::RwLock;
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use std::hash::Hash;
 use lru::LruCache;
@@ -49,20 +48,24 @@ where
         }
     }
 
+    #[allow(dead_code)]
     pub fn invalidate(&self, key: &K) {
         self.inner.write().pop(key);
     }
 
+    #[allow(dead_code)]
     pub fn clear(&self) {
         self.inner.write().clear();
     }
 }
 
+#[allow(dead_code)]
 /// MusicBrainz lookup cache
 pub static MUSICBRAINZ_CACHE: once_cell::sync::Lazy<TtlLruCache<String, Option<String>>> = once_cell::sync::Lazy::new(|| {
     TtlLruCache::new(5000, Duration::from_secs(86400 * 7))
 });
 
+#[allow(dead_code)]
 /// Quality analysis cache - defined in queue_organizer to avoid circular dependency
 pub fn quality_cache() -> Arc<TtlLruCache<String, crate::queue_organizer::QualityReport>> {
     static CACHE: once_cell::sync::Lazy<Arc<TtlLruCache<String, crate::queue_organizer::QualityReport>>> = once_cell::sync::Lazy::new(|| {
@@ -71,6 +74,7 @@ pub fn quality_cache() -> Arc<TtlLruCache<String, crate::queue_organizer::Qualit
     CACHE.clone()
 }
 
+#[allow(dead_code)]
 /// Batch database writer for high-throughput writes
 pub struct BatchWriter<T> {
     buffer: Vec<T>,
@@ -80,6 +84,7 @@ pub struct BatchWriter<T> {
     flush_fn: Arc<dyn Fn(Vec<T>) -> anyhow::Result<()> + Send + Sync>,
 }
 
+#[allow(dead_code)]
 impl<T> BatchWriter<T> {
     pub fn new(
         batch_size: usize,
@@ -116,6 +121,8 @@ impl<T> BatchWriter<T> {
     }
 }
 
+
+#[allow(dead_code)]
 impl<T> Drop for BatchWriter<T> {
     fn drop(&mut self) {
         let _ = self.flush();
@@ -129,9 +136,10 @@ pub mod simd {
     
     /// Fast ASCII lowercase conversion using SIMD
     #[inline]
+    #[allow(dead_code)]
     pub fn to_lowercase_ascii_simd(input: &[u8]) -> Vec<u8> {
         let mut output: Vec<u8> = Vec::with_capacity(input.len());
-        let mut chunks = input.chunks_exact(32);
+        let chunks = input.chunks_exact(32);
         let remainder = chunks.remainder();
         
         for chunk in chunks {
@@ -154,6 +162,7 @@ pub mod simd {
     
     /// Fast whitespace check
     #[inline]
+    #[allow(dead_code)]
     pub fn is_whitespace_simd(b: u8) -> bool {
         b == b' ' || b == b'\t' || b == b'\n' || b == b'\r'
     }
@@ -162,16 +171,19 @@ pub mod simd {
 /// Non-SIMD fallback
 #[cfg(not(target_arch = "x86_64"))]
 pub mod simd {
+    #[allow(dead_code)]
     pub fn to_lowercase_ascii_simd(input: &[u8]) -> Vec<u8> {
         input.iter().map(|&b| if b >= b'A' && b <= b'Z' { b + 0x20 } else { b }).collect()
     }
     
     #[inline]
+    #[allow(dead_code)]
     pub fn is_whitespace_simd(b: u8) -> bool {
         b == b' ' || b == b'\t' || b == b'\n' || b == b'\r'
     }
 }
 
+#[allow(dead_code)]
 /// Fast string normalization using SIMD where available
 pub fn normalize_string_fast(input: &str) -> String {
     let bytes = input.as_bytes();
@@ -218,8 +230,8 @@ pub fn normalize_string_fast(input: &str) -> String {
 #[cfg(feature = "rayon")]
 pub mod parallel {
     use rayon::prelude::*;
-    use super::*;
     
+    #[allow(dead_code)]
     pub fn scan_directories_parallel(
         dirs: &[&str],
         scanner: &crate::adb_scanner::AdbScanner,
@@ -234,13 +246,14 @@ pub mod parallel {
         Ok(results)
     }
 }
-
+#[allow(dead_code)]
 /// Async batch processor for high-throughput operations
 pub struct AsyncBatchProcessor<T> {
     sender: tokio::sync::mpsc::UnboundedSender<T>,
     flush_handle: tokio::task::JoinHandle<()>,
 }
 
+#[allow(dead_code)]
 impl<T> AsyncBatchProcessor<T>
 where
     T: Send + Sync + 'static,
@@ -291,18 +304,21 @@ where
     }
 }
 
+#[allow(dead_code)]
 impl<T> Drop for AsyncBatchProcessor<T> {
     fn drop(&mut self) {
         self.flush_handle.abort();
     }
 }
 
+#[allow(dead_code)]
 /// Memory pool for reducing allocations in hot paths
 pub struct MemoryPool<T> {
     pool: parking_lot::Mutex<Vec<T>>,
     factory: fn() -> T,
 }
 
+#[allow(dead_code)]
 impl<T> MemoryPool<T> {
     pub fn new(factory: fn() -> T) -> Self {
         Self {
@@ -320,6 +336,7 @@ impl<T> MemoryPool<T> {
     }
 }
 
+#[allow(dead_code)]
 impl<T> Default for MemoryPool<T>
 where
     T: Default,
@@ -331,8 +348,9 @@ where
 
 /// Fast path for common operations
 pub mod fast_path {
-    use super::*;
     
+    
+    #[allow(dead_code)]
     /// Quick artist name extraction without full parsing
     pub fn extract_artist_quick(title: &str) -> Option<String> {
         let separators = [" - ", " – ", " — ", " | ", " · "];
@@ -347,11 +365,13 @@ pub mod fast_path {
         None
     }
     
+    #[allow(dead_code)]
     /// Quick check if string looks like a YouTube video ID
     pub fn is_video_id(s: &str) -> bool {
         s.len() == 11 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     }
     
+    #[allow(dead_code)]
     /// Quick bitrate estimation from file size and duration
     pub fn estimate_bitrate(file_size: u64, duration_secs: f64) -> Option<u32> {
         if duration_secs > 0.0 && file_size > 0 {

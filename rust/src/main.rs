@@ -25,18 +25,18 @@ mod tag;
 mod tui;
 mod ytdlp;
 
-use adb_scanner::{AdbScanner, ScannedSong, build_search_query};
+use adb_scanner::{AdbScanner, build_search_query};
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::Html;
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -197,6 +197,7 @@ fn persist_now() {
 
 // --- worker machinery ------------------------------------------------------
 
+#[allow(dead_code)]
 async fn claim_next_item() -> Option<Item> {
     let s = state();
     let mut items = s.items.lock().unwrap();
@@ -267,6 +268,46 @@ async fn process_item(item: &Item, cancel: Arc<AtomicBool>) {
     let cfg = config();
     let mut final_error: Option<String> = None;
 
+    // Pre-download check: if file already in archive, skip download
+    if let Some(id) = ytdlp::query_param(&item.url, "v") {
+        let archive_dir = std::path::Path::new(&cfg.songs_archive_dir);
+        let needle = format!("[{id}].");
+        let mut already_downloaded = false;
+        if let Ok(rd) = std::fs::read_dir(archive_dir) {
+            for entry in rd.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // Recursively check subdirectories
+                    if let Ok(sub_rd) = std::fs::read_dir(&path) {
+                        for sub_entry in sub_rd.flatten() {
+                            let name = sub_entry.file_name().to_string_lossy().to_string();
+                            if name.contains(&needle) && name.ends_with(".opus") {
+                                already_downloaded = true;
+                                info!("File already in archive, skipping download: {}", item.title);
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.contains(&needle) && name.ends_with(".opus") {
+                        already_downloaded = true;
+                        info!("File already in archive, skipping download: {}", item.title);
+                        break;
+                    }
+                }
+                if already_downloaded { break; }
+            }
+        }
+        if already_downloaded {
+            set_status(item, "Completed (already in archive)");
+            record_history(item);
+            return;
+        }
+    }
+
+    let mut final_error: Option<String> = None;
+
     for attempt in 1..=cfg.auto_retry_attempts {
         if cancel.load(Ordering::Relaxed) {
             set_status(item, "Cancelled");
@@ -286,7 +327,6 @@ async fn process_item(item: &Item, cancel: Arc<AtomicBool>) {
             );
         }
         info!("Starting download: {} ({})", item.title, item.url);
-
         // Progress plumbing: ytdlp::download_once sends "pct|42.3" updates
         // over the channel while aria2c runs; this task paints them onto
         // the item's status so the UI shows a live percentage.
@@ -510,14 +550,17 @@ async fn worker() {
             *state().active_large_downloads.lock().unwrap() -= 1;
         }
         
-        if item.status == "Completed" {
+        // Handle both "Completed" and "Completed (already in archive)"
+        if item.status.starts_with("Completed") {
             state().queue_organizer.mark_completed(&queue_item.id, 0).ok();
+            state().db.update_queue_status(&queue_item.id, "completed", None).ok();
             tokio::spawn(auto_remove_after_delay(
                 item.id.clone(),
                 config().auto_remove_delay_seconds,
             ));
         } else {
             state().queue_organizer.requeue_failed(&queue_item.id, &item.status).ok();
+            state().db.update_queue_status(&queue_item.id, &item.status, Some(queue_item.retry_count)).ok();
             persist_now();
         }
     }
@@ -697,11 +740,11 @@ struct BulkURLRequest {
 }
 
 async fn add_to_queue(
-    State(_): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<BulkURLRequest>,
 ) -> Json<serde_json::Value> {
     let urls = ytdlp::parse_input_urls(&req.raw_input);
-    let mut added_ids = Vec::new();
+    let mut added_items = Vec::new();
     let mut duplicates = Vec::new();
     
     for raw_url in urls {
@@ -763,7 +806,7 @@ async fn add_to_queue(
                 quality_score: None,
             };
             
-            let quality_report = state().queue_organizer.quality_analyzer.analyze(&meta);
+            let quality_report = state.queue_organizer.quality_analyzer.analyze(&meta);
             
             let queue_item = QueueItem {
                 id: uuid::Uuid::new_v4().simple().to_string()[..8].to_string(),
@@ -782,9 +825,9 @@ async fn add_to_queue(
                 metadata: meta,
             };
             
-            match state().queue_organizer.add_item(queue_item) {
+            match state.queue_organizer.add_item(queue_item) {
                 Ok(queue_organizer::AddResult::Added { item }) => {
-                    added_ids.push(item.id);
+                    added_items.push(item);
                 }
                 Ok(queue_organizer::AddResult::Duplicate { existing_id, fingerprint }) => {
                     duplicates.push(json!({"id": existing_id, "fingerprint": fingerprint}));
@@ -795,11 +838,19 @@ async fn add_to_queue(
             }
         }
     }
-    info!("Added {} item(s) to queue, {} duplicates skipped", added_ids.len(), duplicates.len());
+    
+    // Persist added items to database
+    if !added_items.is_empty() {
+        if let Err(e) = state.db.batch_add_to_queue(&added_items) {
+            error!("Failed to persist queue items to database: {}", e);
+        }
+    }
+    
+    info!("Added {} item(s) to queue, {} duplicates skipped", added_items.len(), duplicates.len());
     persist_now();
     Json(json!({
-        "message": format!("Added {} item(s)", added_ids.len()),
-        "ids": added_ids,
+        "message": format!("Added {} item(s)", added_items.len()),
+        "ids": added_items.iter().map(|i| i.id.clone()).collect::<Vec<_>>(),
         "duplicates": duplicates
     }))
 }
@@ -921,7 +972,7 @@ async fn reorder_queue(Json(req): Json<ReorderRequest>) -> Json<serde_json::Valu
     Json(json!({"message": "Reordered"}))
 }
 
-async fn delete_item(Path(item_id): Path<String>) -> Result<Json<serde_json::Value>, StatusCode> {
+async fn delete_item(AxumPath(item_id): AxumPath<String>) -> Result<Json<serde_json::Value>, StatusCode> {
     let s = state();
     let (status_snapshot, steps_snapshot) = {
         let items = s.items.lock().unwrap();
@@ -962,7 +1013,7 @@ fn set_status_snapshot(item_id: &str, status: &str) {
 }
 
 async fn retry_item(
-    Path(item_id): Path<String>,
+    AxumPath(item_id): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let s = state();
     {
@@ -1135,7 +1186,7 @@ async fn list_plugins() -> Json<serde_json::Value> {
 }
 
 async fn execute_plugin_command(
-    Path(plugin_id): Path<String>,
+    AxumPath(plugin_id): AxumPath<String>,
     Json(req): Json<PluginCommandRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     match state().plugin_manager.execute_command(&plugin_id, &req.command, &req.args).await {
@@ -1144,6 +1195,248 @@ async fn execute_plugin_command(
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),
         )),
+    }
+}
+
+// ===== FILE MANAGER API =====
+
+/// Serve the file manager HTML page
+async fn file_manager() -> Html<&'static str> {
+    Html(include_str!("../../web/file-manager.html"))
+}
+
+#[derive(Deserialize)]
+struct BrowseQuery {
+    path: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BrowseItem {
+    name: String,
+    path: String,
+    is_dir: bool,
+    is_audio: bool,
+    size: u64,
+    mtime: String,
+}
+
+#[derive(Serialize)]
+struct BrowseResponse {
+    path: String,
+    items: Vec<BrowseItem>,
+}
+
+/// Browse local filesystem (Songs_archive)
+async fn browse_local(Query(q): Query<BrowseQuery>) -> Json<serde_json::Value> {
+    let base = PathBuf::from(&config().songs_archive_dir);
+    let req_path = q.path.unwrap_or_default();
+    let target = if req_path.is_empty() { base.clone() } else { base.join(&req_path) };
+    
+    // Security: ensure path is within base
+    let target = match target.canonicalize() {
+        Ok(p) if p.starts_with(&base) => p,
+        _ => {
+            return Json(json!({ "error": "Path traversal not allowed", "path": "", "items": [] }));
+        }
+    };
+    
+    let mut items = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&target) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_dir = path.is_dir();
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            let is_audio = matches!(ext.as_str(), "opus" | "mp3" | "flac" | "m4a" | "ogg" | "wav");
+            
+            let (size, mtime) = if let Ok(meta) = entry.metadata() {
+                let size = meta.len();
+                let mtime = meta.modified().ok()
+                    .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339())
+                    .unwrap_or_default();
+                (size, mtime)
+            } else {
+                (0, String::new())
+            };
+            
+            let rel_path = path.strip_prefix(&base).unwrap_or(&path).to_string_lossy().to_string();
+            items.push(BrowseItem {
+                name,
+                path: rel_path,
+                is_dir,
+                is_audio,
+                size,
+                mtime,
+            });
+        }
+    }
+    
+    // Sort: directories first, then by name
+    items.sort_by(|a, b| {
+        match (a.is_dir, b.is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.cmp(&b.name),
+        }
+    });
+    
+    let rel_path = target.strip_prefix(&base).unwrap_or(Path::new("")).to_string_lossy().to_string();
+    Json(json!(BrowseResponse {
+        path: rel_path,
+        items,
+    }))
+}
+
+/// List ADB devices
+async fn adb_devices() -> Json<serde_json::Value> {
+    match adb_scanner::AdbScanner::list_devices() {
+        Ok(devices) => {
+            let mut result = Vec::new();
+            for serial in devices {
+                // Get model name and storage info
+                let model = adb_scanner::AdbScanner::new(Some(serial.clone()))
+                    .get_device_model()
+                    .unwrap_or_else(|_| "Unknown".to_string());
+                let storage = adb_scanner::AdbScanner::new(Some(serial.clone()))
+                    .get_storage_info()
+                    .ok()
+                    .map(|s| json!({
+                        "total": s.total,
+                        "free": s.free,
+                        "available": s.available,
+                    }));
+                result.push(json!({
+                    "serial": serial,
+                    "model": model,
+                    "storage": storage
+                }));
+            }
+            Json(json!({ "devices": result }))
+        }
+        Err(e) => Json(json!({ "error": e.to_string(), "devices": [] }))
+    }
+}
+
+#[derive(Deserialize)]
+struct AdbBrowseQuery {
+    device: String,
+    path: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct AdbFileItem {
+    name: String,
+    path: String,
+    is_dir: bool,
+    is_audio: bool,
+    size: u64,
+    mtime: String,
+}
+
+/// Browse ADB device filesystem
+async fn adb_browse(Query(q): Query<AdbBrowseQuery>) -> Json<serde_json::Value> {
+    let scanner = adb_scanner::AdbScanner::new(Some(q.device.clone()));
+    let path = q.path.unwrap_or_else(|| "/sdcard/Music".to_string());
+    
+    match scanner.scan_directory(&path) {
+        Ok(songs) => {
+            let mut items = Vec::new();
+            
+            // Also list directories
+            if let Ok(dirs) = scanner.list_directory(&path) {
+                for dir in dirs {
+                    items.push(AdbFileItem {
+                        name: dir.name,
+                        path: dir.path,
+                        is_dir: true,
+                        is_audio: false,
+                        size: 0,
+                        mtime: dir.mtime.unwrap_or_default(),
+                    });
+                }
+            }
+            
+            // Add audio files
+            for song in songs {
+                let is_audio = true;
+                let ext = Path::new(&song.file_path).extension()
+                    .and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                let is_audio = matches!(ext.as_str(), "opus" | "mp3" | "flac" | "m4a" | "ogg" | "wav");
+                
+                items.push(AdbFileItem {
+                    name: song.file_path.split('/').last().unwrap_or(&song.title).to_string(),
+                    path: song.file_path,
+                    is_dir: false,
+                    is_audio,
+                    size: song.file_size as u64,
+                    mtime: String::new(), // ScannedSong doesn't have mtime
+                });
+            }
+            
+            items.sort_by(|a, b| {
+                match (a.is_dir, b.is_dir) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a.name.cmp(&b.name),
+                }
+            });
+            
+            Json(json!({ "path": path, "items": items }))
+        }
+        Err(e) => Json(json!({ "error": e.to_string(), "path": path, "items": [] }))
+    }
+}
+
+#[derive(Deserialize)]
+struct AdbWriteRequest {
+    device: String,
+    local_path: String,
+    remote_path: String,
+    #[serde(default = "default_conflict")]
+    conflict: String,
+}
+
+fn default_conflict() -> String { "skip".to_string() }
+
+/// Write file to ADB device
+async fn adb_write(Json(req): Json<AdbWriteRequest>) -> Json<serde_json::Value> {
+    let scanner = adb_scanner::AdbScanner::new(Some(req.device));
+    let local = PathBuf::from(&req.local_path);
+    let remote = std::path::Path::new(&req.remote_path);
+    
+    if !local.exists() {
+        return Json(json!({ "error": "Local file not found" }));
+    }
+    
+    match scanner.push_file(&local, remote, &req.conflict) {
+        Ok(_) => Json(json!({ "success": true })),
+        Err(e) => Json(json!({ "error": e.to_string() }))
+    }
+}
+
+#[derive(Deserialize)]
+struct AdbReadRequest {
+    device: String,
+    remote_path: String,
+    local_path: String,
+    #[serde(default = "default_conflict")]
+    conflict: String,
+}
+
+/// Read file from ADB device
+async fn adb_read(Json(req): Json<AdbReadRequest>) -> Json<serde_json::Value> {
+    let scanner = adb_scanner::AdbScanner::new(Some(req.device));
+    let remote = std::path::Path::new(&req.remote_path);
+    let local = PathBuf::from(&req.local_path);
+    
+    // Ensure parent directory exists
+    if let Some(parent) = local.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    
+    match scanner.pull_file(remote, &local, &req.conflict) {
+        Ok(_) => Json(json!({ "success": true })),
+        Err(e) => Json(json!({ "error": e.to_string() }))
     }
 }
 
@@ -1482,10 +1775,14 @@ async fn main() {
     let _ = std::fs::create_dir_all(&config().temp_workspace_dir);
     load_state();
 
+    // Load queue items from database into QueueOrganizer
+    if let Err(e) = state().queue_organizer.load_from_db(&state().db) {
+        error!("Failed to load queue from database: {}", e);
+    }
+
     for _ in 0..config().concurrency_max {
         tokio::spawn(worker());
     }
-    
     tokio::spawn(async {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         loop {
@@ -1503,6 +1800,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(index))
+        .route("/file-manager", get(file_manager))
         .route("/api/add", post(add_to_queue))
         .route("/api/search", get(search))
         .route("/api/queue", get(get_queue).delete(clear_finished))
@@ -1521,6 +1819,12 @@ async fn main() {
         .route("/api/songs", get(get_songs))
         .route("/api/plugins", get(list_plugins))
         .route("/api/plugins/{id}/command", post(execute_plugin_command))
+        // File Manager API
+        .route("/api/local/browse", get(browse_local))
+        .route("/api/adb/devices", get(adb_devices))
+        .route("/api/adb/browse", get(adb_browse))
+        .route("/api/adb/write", post(adb_write))
+        .route("/api/adb/read", post(adb_read))
         .with_state(state().clone());
 
     let addr = format!("{}:{}", config().host, config().port);

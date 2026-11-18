@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bulker File Manager</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0; padding: 20px;
+            background: #f5f5f5; color: #333;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        h1 { margin-top: 0; }
+        
+        /* Tabs */
+        .tabs { display: flex; gap: 8px; margin-bottom: 20px; }
+        .tab-btn {
+            padding: 10px 20px; border: none; background: #e0e0e0;
+            border-radius: 4px 4px 0 0; cursor: pointer;
+            font-weight: 500; transition: background 0.2s;
+        }
+        .tab-btn.active { background: #1976d2; color: white; }
+        .tab-btn:hover:not(.active) { background: #d0d0d0; }
+        
+        .tab-panel { display: none; background: white; border-radius: 0 4px 4px 4px; padding: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .tab-panel.active { display: block; }
+        
+        /* Cards */
+        .card { background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .card h3 { margin-top: 0; }
+        
+        /* Forms */
+        .form-group { margin-bottom: 16px; }
+        label { display: block; margin-bottom: 6px; font-weight: 500; }
+        input[type="text"], textarea, select {
+            width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;
+        }
+        textarea { min-height: 100px; resize: vertical; font-family: monospace; }
+        button { padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-weight: 500; }
+        .btn-primary { background: #1976d2; color: white; }
+        .btn-primary:hover { background: #1565c0; }
+        .btn-secondary { background: #757575; color: white; }
+        .btn-danger { background: #d32f2f; color: white; }
+        .btn-success { background: #388e3c; color: white; }
+        .btn-small { padding: 6px 12px; font-size: 13px; }
+        
+        /* Queue list */
+        .queue-item { display: flex; align-items: center; gap: 12px; padding: 12px; border-bottom: 1px solid #eee; }
+        .queue-item:last-child { border-bottom: none; }
+        .queue-status { width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; }
+        .status-pending { background: #fff3e0; color: #e65100; }
+        .status-scheduled { background: #e3f2fd; color: #1565c0; }
+        .status-downloading { background: #e8eaf6; color: #3949ab; animation: pulse 1.5s infinite; }
+        .status-completed { background: #e8f5e9; color: #2e7d32; }
+        .status-error { background: #fce4ec; color: #c62828; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .queue-info { flex: 1; }
+        .queue-title { font-weight: 500; }
+        .queue-meta { font-size: 12px; color: #666; }
+        
+        /* File Browser */
+        .browser-row { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .browser-panel { border: 1px solid #ddd; border-radius: 8px; overflow: hidden; }
+        .browser-header { background: #f5f5f5; padding: 12px 16px; border-bottom: 1px solid #ddd; font-weight: 600; }
+        .browser-path { font-size: 13px; color: #666; margin-top: 4px; font-family: monospace; }
+        .file-list { max-height: 500px; overflow-y: auto; }
+        .file-item { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid #f0f0f0; cursor: pointer; }
+        .file-item:hover { background: #fafafa; }
+        .file-item.selected { background: #e3f2fd; }
+        .file-icon { width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 4px; }
+        .file-icon.folder { background: #fff3e0; color: #e65100; }
+        .file-icon.audio { background: #e8f5e9; color: #2e7d32; }
+        .file-icon.image { background: #e8eaf6; color: #3949ab; }
+        .file-name { flex: 1; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .file-size { font-size: 12px; color: #888; }
+        .file-mtime { font-size: 11px; color: #999; }
+        
+        /* Transfer panel */
+        .transfer-panel { border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin-top: 20px; }
+        .transfer-row { display: flex; gap: 16px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+        .transfer-direction { display: flex; align-items: center; gap: 8px; }
+        .transfer-arrow { font-size: 24px; color: #1976d2; }
+        .queue-count { background: #1976d2; color: white; padding: 2px 8px; border-radius: 12px; font-size: 12px; }
+        .progress-bar { width: 100%; height: 8px; background: #e0e0e0; border-radius: 4px; overflow: hidden; margin-top: 12px; }
+        .progress-fill { height: 100%; background: #1976d2; transition: width 0.3s; border-radius: 4px; }
+        
+        /* Device selector */
+        .device-selector { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+        .device-card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; min-width: 200px; cursor: pointer; transition: all 0.2s; }
+        .device-card:hover { border-color: #1976d2; }
+        .device-card.selected { border-color: #1976d2; background: #e3f2fd; box-shadow: 0 0 0 2px #1976d2; }
+        .device-name { font-weight: 600; }
+        .device-model { font-size: 13px; color: #666; }
+        .device-storage { font-size: 12px; color: #888; margin-top: 4px; }
+        
+        /* Empty state */
+        .empty-state { text-align: center; padding: 40px; color: #888; }
+        .empty-state svg { width: 64px; height: 64px; margin-bottom: 16px; opacity: 0.5; }
+        
+        /* Toast */
+        .toast { position: fixed; bottom: 20px; right: 20px; padding: 12px 24px; border-radius: 4px; color: white; font-weight: 500; box-shadow: 0 4px 12px rgba(0,0,0,0.15); animation: slideIn 0.3s; z-index: 1000; }
+        .toast.success { background: #388e3c; }
+        .toast.error { background: #d32f2f; }
+        .toast.info { background: #1976d2; }
+        @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+        
+        /* Log area */
+        .log-area { background: #1e1e1e; color: #d4d4d4; font-family: monospace; font-size: 12px; padding: 16px; border-radius: 4px; max-height: 300px; overflow-y: auto; }
+        .log-line { margin: 2px 0; }
+        .log-info { color: #4fc3f7; }
+        .log-warn { color: #ffb74d; }
+        .log-error { color: #ef5350; }
+        .log-success { color: #81c784; }
+        
+        /* Responsive */
+        @media (max-width: 900px) {
+            .browser-row { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>🎵 Bulker File Manager</h1>
+    
+    <div class="tabs">
+        <button class="tab-btn active" data-tab="queue" onclick="switchTab('queue')">📥 Queue & Add</button>
+        <button class="tab-btn" data-tab="local" onclick="switchTab('local')">💻 Local Files</button>
+        <button class="tab-btn" data-tab="device" onclick="switchTab('device')">📱 ADB Device</button>
+        <button class="tab-btn" data-tab="transfer" onclick="switchTab('transfer')">🔄 Transfer</button>
+    </div>
+
+    <!-- QUEUE TAB -->
+    <div class="tab-panel active" id="tab-queue">
+        <div class="card">
+            <h3>Add URLs to Queue</h3>
+            <div class="form-group">
+                <label>YouTube Music URLs (one per line, playlists supported)</label>
+                <textarea id="urlInput" placeholder="https://music.youtube.com/watch?v=...&#10;https://music.youtube.com/playlist?list=..."></textarea>
+            </div>
+            <button class="btn-primary" onclick="addToQueue()">Add to Queue</button>
+        </div>
+
+        <div class="card">
+            <h3>Queue (<span id="queueCount">0</span>)</h3>
+            <div id="queueList"></div>
+            <div id="emptyQueue" class="empty-state" style="display: none;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                </svg>
+                <p>Queue is empty. Add URLs above or browse local files.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- LOCAL FILES TAB -->
+    <div class="tab-panel" id="tab-local">
+        <div class="card">
+            <h3>Songs Archive Browser</h3>
+            <div class="browser-row">
+                <div class="browser-panel">
+                    <div class="browser-header">
+                        📁 Local: Songs_archive
+                        <div class="browser-path" id="localPath">/</div>
+                    </div>
+                    <div class="file-list" id="localFileList"></div>
+                </div>
+                <div class="browser-panel">
+                    <div class="browser-header">
+                        📦 Selection Queue (<span id="localSelCount">0</span> files)
+                    </div>
+                    <div class="file-list" id="localSelectionList"></div>
+                </div>
+            </div>
+            <div style="margin-top: 12px;">
+                <button class="btn-secondary btn-small" onclick="clearLocalSelection()">Clear Selection</button>
+                <button class="btn-primary btn-small" onclick="addLocalToTransfer()">Add to Transfer →</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- DEVICE TAB -->
+    <div class="tab-panel" id="tab-device">
+        <div class="card">
+            <h3>Connected ADB Devices</h3>
+            <button class="btn-secondary btn-small" onclick="refreshDevices()">🔄 Refresh Devices</button>
+            <div id="deviceList" class="device-selector"></div>
+            <div id="noDevices" class="empty-state" style="display: none;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <rect x="2" y="3" width="20" height="14" rx="2"></rect>
+                    <path d="M8 21h8M12 17v4"></path>
+                </svg>
+                <p>No ADB devices connected. Connect your phone and enable USB debugging.</p>
+            </div>
+        </div>
+
+        <div class="card" id="deviceBrowser" style="display: none;">
+            <h3>Device: <span id="selectedDeviceName"></span> - Music Folder</h3>
+            <div class="browser-row">
+                <div class="browser-panel">
+                    <div class="browser-header">
+                        📁 Device: /sdcard/Music
+                        <div class="browser-path" id="devicePath">/sdcard/Music</div>
+                    </div>
+                    <div class="file-list" id="deviceFileList"></div>
+                </div>
+                <div class="browser-panel">
+                    <div class="browser-header">
+                        📦 Selection Queue (<span id="deviceSelCount">0</span> files)
+                    </div>
+                    <div class="file-list" id="deviceSelectionList"></div>
+                </div>
+            </div>
+            <div style="margin-top: 12px;">
+                <button class="btn-secondary btn-small" onclick="clearDeviceSelection()">Clear Selection</button>
+                <button class="btn-primary btn-small" onclick="addDeviceToTransfer()">Add to Transfer →</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- TRANSFER TAB -->
+    <div class="tab-panel" id="tab-transfer">
+        <div class="card">
+            <h3>Transfer Manager</h3>
+            
+            <div class="transfer-panel">
+                <h4>Pending Transfers</h4>
+                <div id="transferList"></div>
+                <div id="emptyTransfer" class="empty-state" style="display: none;">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 21l5-5-5-5M5 7h14"></path>
+                    </svg>
+                    <p>No files selected. Browse Local or Device tabs to add files.</p>
+                </div>
+            </div>
+
+            <div class="transfer-row">
+                <div class="transfer-direction">
+                    <span>Direction:</span>
+                    <select id="transferDirection">
+                        <option value="local-to-device">💻 Local → 📱 Device</option>
+                        <option value="device-to-local">📱 Device → 💻 Local</option>
+                    </select>
+                </div>
+                <div class="transfer-direction">
+                    <span>On conflict:</span>
+                    <select id="transferConflict">
+                        <option value="skip">Skip (keep existing)</option>
+                        <option value="overwrite">Overwrite</option>
+                        <option value="rename">Rename (add suffix)</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="transfer-row">
+                <button class="btn-primary" onclick="startTransfer()">▶ Start Transfer</button>
+                <button class="btn-secondary" onclick="clearAllTransfers()">🗑 Clear All</button>
+            </div>
+
+            <div class="progress-bar" id="transferProgress" style="display: none;">
+                <div class="progress-fill" id="transferProgressFill" style="width: 0%"></div>
+            </div>
+            <div id="transferStatus" style="margin-top: 8px; font-size: 13px; color: #666;"></div>
+        </div>
+
+        <div class="card">
+            <h3>Transfer Log</h3>
+            <div class="log-area" id="transferLog"></div>
+        </div>
+    </div>
+</div>
+
+<div id="toastContainer"></div>
+
+<script>
+// ===== STATE =====
+let state = {
+    queue: [],
+    localFiles: [],
+    localSelection: new Set(),
+    localCurrentPath: '',
+    deviceFiles: [],
+    deviceSelection: new Set(),
+    deviceCurrentPath: '/sdcard/Music',
+    devices: [],
+    selectedDevice: null,
+    transfers: [],
+    transferQueue: [],
+    activeTransfer: false
+};
+
+// ===== UTIL =====
+function showToast(msg, type = 'info') {
+    const container = document.getElementById('toastContainer');
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = msg;
+    container.appendChild(toast);
+    setTimeout(() => toast.remove(), 4000);
+}
+
+function log(msg, type = 'info') {
+    const logArea = document.getElementById('transferLog');
+    const line = document.createElement('div');
+    line.className = `log-line log-${type}`;
+    const time = new Date().toLocaleTimeString();
+    line.textContent = `[${time}] ${msg}`;
+    logArea.appendChild(line);
+    logArea.scrollTop = logArea.scrollHeight;
+}
+
+async function api(endpoint, options = {}) {
+    const res = await fetch(endpoint, {
+        headers: { 'Content-Type': 'application/json' },
+        ...options
+    });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || res.statusText);
+    }
+    return res.json();
+}
+
+// ===== TABS =====
+function switchTab(tab) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
+    document.getElementById(`tab-${tab}`).classList.add('active');
+}
+
+// ===== QUEUE TAB =====
+async function loadQueue() {
+    const res = await api('/api/queue');
+    state.queue = res.items || [];
+    renderQueue();
+}
+
+function renderQueue() {
+    const list = document.getElementById('queueList');
+    const empty = document.getElementById('emptyQueue');
+    const count = document.getElementById('queueCount');
+    
+    count.textContent = state.queue.length;
+    
+    if (state.queue.length === 0) {
+        list.innerHTML = '';
+        empty.style.display = 'block';
+        return;
+    }
+    empty.style.display = 'none';
+    
+    list.innerHTML = state.queue.map(item => `
+        <div class="queue-item">
+            <div class="queue-status status-${item.status}">${statusIcon(item.status)}</div>
+            <div class="queue-info">
+                <div class="queue-title">${escapeHtml(item.title)}</div>
+                <div class="queue-meta">${item.artist || 'Unknown Artist'} • ${formatBytes(item.estimated_size || 0)} • ${item.retry_count > 0 ? `Retry: ${item.retry_count}` : ''}</div>
+            </div>
+            <button class="btn-secondary btn-small" onclick="retryItem('${item.id}')">↻</button>
+            <button class="btn-danger btn-small" onclick="removeFromQueue('${item.id}')">✕</button>
+        </div>
+    `).join('');
+}
+
+function statusIcon(status) {
+    const icons = {
+        pending: '⏳',
+        scheduled: '📅',
+        downloading: '⬇',
+        completed: '✓',
+        error: '✗'
+    };
+    return icons[status] || '?';
+}
+
+async function addToQueue() {
+    const input = document.getElementById('urlInput');
+    const urls = input.value.trim();
+    if (!urls) { showToast('Enter at least one URL', 'error'); return; }
+    
+    try {
+        await api('/api/add', { method: 'POST', body: JSON.stringify({ raw_input: urls }) });
+        showToast('Added to queue', 'success');
+        input.value = '';
+        loadQueue();
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function retryItem(id) {
+    try {
+        await api(`/api/queue/${id}/retry`, { method: 'POST' });
+        showToast('Retrying...', 'info');
+        loadQueue();
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+async function removeFromQueue(id) {
+    try {
+        await api(`/api/queue/${id}`, { method: 'DELETE' });
+        showToast('Removed', 'info');
+        loadQueue();
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+// ===== LOCAL FILES TAB =====
+async function loadLocalFiles(path = '') {
+    try {
+        const res = await api('/api/local/browse?path=' + encodeURIComponent(path));
+        state.localFiles = res.items || [];
+        state.localCurrentPath = res.path || '';
+        renderLocalFiles();
+        document.getElementById('localPath').textContent = state.localCurrentPath || '/';
+    } catch (e) { showToast('Failed to load: ' + e.message, 'error'); }
+}
+
+function renderLocalFiles() {
+    const list = document.getElementById('localFileList');
+    const selList = document.getElementById('localSelectionList');
+    const selCount = document.getElementById('localSelCount');
+    
+    // File list
+    list.innerHTML = state.localFiles.map(f => `
+        <div class="file-item ${state.localSelection.has(f.path) ? 'selected' : ''}" onclick="toggleLocalSelection('${escapeJs(f.path)}')">
+            <div class="file-icon ${f.is_dir ? 'folder' : f.is_audio ? 'audio' : 'image'}">
+                ${f.is_dir ? '📁' : f.is_audio ? '🎵' : '🖼'}
+            </div>
+            <div class="file-name">${escapeHtml(f.name)}</div>
+            ${!f.is_dir ? `<div class="file-size">${formatBytes(f.size)}</div>` : ''}
+            <div class="file-mtime">${f.mtime || ''}</div>
+        </div>
+    `).join('') || '<div class="empty-state"><p>Empty folder</p></div>';
+    
+    // Selection list
+    const sel = Array.from(state.localSelection);
+    selCount.textContent = sel.length;
+    selList.innerHTML = sel.map(p => {
+        const f = state.localFiles.find(x => x.path === p);
+        return f ? `
+            <div class="file-item">
+                <div class="file-icon ${f.is_audio ? 'audio' : 'image'}">${f.is_audio ? '🎵' : '🖼'}</div>
+                <div class="file-name">${escapeHtml(f.name)}</div>
+                <div class="file-size">${formatBytes(f.size)}</div>
+                <button class="btn-danger btn-small" onclick="toggleLocalSelection('${escapeJs(f.path)}')">✕</button>
+            </div>
+        ` : '';
+    }).join('') || '<div class="empty-state"><p>No files selected</p></div>';
+}
+
+function toggleLocalSelection(path) {
+    if (state.localSelection.has(path)) {
+        state.localSelection.delete(path);
+    } else {
+        const f = state.localFiles.find(x => x.path === path);
+        if (f && f.is_dir) {
+            loadLocalFiles(path); // Navigate into folder
+            return;
+        }
+        state.localSelection.add(path);
+    }
+    renderLocalFiles();
+}
+
+function clearLocalSelection() {
+    state.localSelection.clear();
+    renderLocalFiles();
+}
+
+function addLocalToTransfer() {
+    if (state.localSelection.size === 0) { showToast('No files selected', 'error'); return; }
+    for (const path of state.localSelection) {
+        const f = state.localFiles.find(x => x.path === path);
+        if (f && !f.is_dir) {
+            state.transfers.push({
+                id: 't_' + Date.now() + '_' + Math.random().toString(36).slice(2),
+                source: 'local',
+                sourcePath: path,
+                destPath: f.name, // relative name for destination
+                size: f.size,
+                status: 'pending'
+            });
+        }
+    }
+    state.localSelection.clear();
+    renderLocalFiles();
+    renderTransfers();
+    switchTab('transfer');
+    showToast(`Added ${state.transfers.length} files to transfer`, 'success');
+}
+
+// ===== DEVICE TAB =====
+async function refreshDevices() {
+    try {
+        const res = await api('/api/adb/devices');
+        state.devices = res.devices || [];
+        renderDevices();
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+function renderDevices() {
+    const list = document.getElementById('deviceList');
+    const empty = document.getElementById('noDevices');
+    
+    if (state.devices.length === 0) {
+        list.innerHTML = '';
+        empty.style.display = 'block';
+        return;
+    }
+    empty.style.display = 'none';
+    
+    list.innerHTML = state.devices.map(d => `
+        <div class="device-card ${state.selectedDevice?.serial === d.serial ? 'selected' : ''}" onclick="selectDevice('${escapeJs(d.serial)}')">
+            <div class="device-name">${escapeHtml(d.model || 'Unknown')} (${d.serial.slice(0,8)}...)</div>
+            <div class="device-model">${escapeHtml(d.serial)}</div>
+            <div class="device-storage">${d.storage ? formatBytes(d.storage.free) + ' free of ' + formatBytes(d.storage.total) : 'Storage unknown'}</div>
+        </div>
+    `).join('');
+}
+
+async function selectDevice(serial) {
+    state.selectedDevice = state.devices.find(d => d.serial === serial);
+    if (!state.selectedDevice) return;
+    
+    document.getElementById('selectedDeviceName').textContent = state.selectedDevice.model || state.selectedDevice.serial;
+    document.getElementById('deviceBrowser').style.display = 'block';
+    renderDevices(); // Update selection highlight
+    await loadDeviceFiles(state.deviceCurrentPath);
+}
+
+async function loadDeviceFiles(path = '/sdcard/Music') {
+    if (!state.selectedDevice) return;
+    try {
+        const res = await api('/api/adb/browse?device=' + encodeURIComponent(state.selectedDevice.serial) + '&path=' + encodeURIComponent(path));
+        state.deviceFiles = res.items || [];
+        state.deviceCurrentPath = res.path || '/sdcard/Music';
+        renderDeviceFiles();
+        document.getElementById('devicePath').textContent = state.deviceCurrentPath;
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+function renderDeviceFiles() {
+    const list = document.getElementById('deviceFileList');
+    const selList = document.getElementById('deviceSelectionList');
+    const selCount = document.getElementById('deviceSelCount');
+    
+    list.innerHTML = state.deviceFiles.map(f => `
+        <div class="file-item ${state.deviceSelection.has(f.path) ? 'selected' : ''}" onclick="toggleDeviceSelection('${escapeJs(f.path)}')">
+            <div class="file-icon ${f.is_dir ? 'folder' : f.is_audio ? 'audio' : 'image'}">
+                ${f.is_dir ? '📁' : f.is_audio ? '🎵' : '🖼'}
+            </div>
+            <div class="file-name">${escapeHtml(f.name)}</div>
+            ${!f.is_dir ? `<div class="file-size">${formatBytes(f.size)}</div>` : ''}
+            <div class="file-mtime">${f.mtime || ''}</div>
+        </div>
+    `).join('') || '<div class="empty-state"><p>Empty folder</p></div>';
+    
+    const sel = Array.from(state.deviceSelection);
+    selCount.textContent = sel.length;
+    selList.innerHTML = sel.map(p => {
+        const f = state.deviceFiles.find(x => x.path === p);
+        return f ? `
+            <div class="file-item">
+                <div class="file-icon ${f.is_audio ? 'audio' : 'image'}">${f.is_audio ? '🎵' : '🖼'}</div>
+                <div class="file-name">${escapeHtml(f.name)}</div>
+                <div class="file-size">${formatBytes(f.size)}</div>
+                <button class="btn-danger btn-small" onclick="toggleDeviceSelection('${escapeJs(f.path)}')">✕</button>
+            </div>
+        ` : '';
+    }).join('') || '<div class="empty-state"><p>No files selected</p></div>';
+}
+
+function toggleDeviceSelection(path) {
+    if (state.deviceSelection.has(path)) {
+        state.deviceSelection.delete(path);
+    } else {
+        const f = state.deviceFiles.find(x => x.path === path);
+        if (f && f.is_dir) {
+            loadDeviceFiles(path);
+            return;
+        }
+        state.deviceSelection.add(path);
+    }
+    renderDeviceFiles();
+}
+
+function clearDeviceSelection() {
+    state.deviceSelection.clear();
+    renderDeviceFiles();
+}
+
+function addDeviceToTransfer() {
+    if (state.deviceSelection.size === 0) { showToast('No files selected', 'error'); return; }
+    if (!state.selectedDevice) { showToast('No device selected', 'error'); return; }
+    
+    for (const path of state.deviceSelection) {
+        const f = state.deviceFiles.find(x => x.path === path);
+        if (f && !f.is_dir) {
+            state.transfers.push({
+                id: 't_' + Date.now() + '_' + Math.random().toString(36).slice(2),
+                source: 'device',
+                sourcePath: path,
+                destPath: f.name,
+                size: f.size,
+                deviceSerial: state.selectedDevice.serial,
+                status: 'pending'
+            });
+        }
+    }
+    state.deviceSelection.clear();
+    renderDeviceFiles();
+    renderTransfers();
+    switchTab('transfer');
+    showToast(`Added ${state.transfers.length} files to transfer`, 'success');
+}
+
+// ===== TRANSFER TAB =====
+function renderTransfers() {
+    const list = document.getElementById('transferList');
+    const empty = document.getElementById('emptyTransfer');
+    const progressBar = document.getElementById('transferProgress');
+    const status = document.getElementById('transferStatus');
+    
+    const pending = state.transfers.filter(t => t.status === 'pending' || t.status === 'transferring').length;
+    
+    if (state.transfers.length === 0) {
+        list.innerHTML = '';
+        empty.style.display = 'block';
+        progressBar.style.display = 'none';
+        status.textContent = '';
+        return;
+    }
+    empty.style.display = 'none';
+    
+    list.innerHTML = state.transfers.map(t => `
+        <div class="file-item" style="border: 1px solid ${t.status === 'completed' ? '#c8e6c9' : t.status === 'error' ? '#ffcdd2' : t.status === 'transferring' ? '#bbdefb' : '#eee'};">
+            <div class="file-icon ${t.source === 'local' ? 'audio' : 'audio'}">${t.source === 'local' ? '💻→📱' : '📱→💻'}</div>
+            <div class="file-name">${escapeHtml(t.destPath)}</div>
+            <div class="file-size">${formatBytes(t.size)}</div>
+            <span class="queue-status status-${t.status}">${statusIcon(t.status)}</span>
+            <button class="btn-danger btn-small" onclick="removeTransfer('${t.id}')">✕</button>
+        </div>
+    `).join('');
+    
+    if (pending > 0) {
+        progressBar.style.display = 'block';
+        status.textContent = `${pending} files pending`;
+    }
+}
+
+function removeTransfer(id) {
+    state.transfers = state.transfers.filter(t => t.id !== id);
+    renderTransfers();
+}
+
+function clearAllTransfers() {
+    state.transfers = [];
+    renderTransfers();
+}
+
+function getDirection() {
+    return document.getElementById('transferDirection').value;
+}
+
+function getConflict() {
+    return document.getElementById('transferConflict').value;
+}
+
+async function startTransfer() {
+    const pending = state.transfers.filter(t => t.status === 'pending');
+    if (pending.length === 0) { showToast('No pending transfers', 'error'); return; }
+    
+    const direction = getDirection();
+    const conflict = getConflict();
+    
+    for (const t of pending) {
+        t.status = 'transferring';
+        renderTransfers();
+        
+        try {
+            if (direction === 'local-to-device') {
+                if (!state.selectedDevice) throw new Error('No device selected');
+                await api('/api/adb/write', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        device: state.selectedDevice.serial,
+                        local_path: t.sourcePath,
+                        remote_path: '/sdcard/Music/' + t.destPath,
+                        conflict: conflict
+                    })
+                });
+            } else {
+                if (!state.selectedDevice) throw new Error('No device selected');
+                await api('/api/adb/read', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        device: state.selectedDevice.serial,
+                        remote_path: t.sourcePath,
+                        local_path: '/home/ashhhhh/Projects/Bulker/Songs_archive/' + t.destPath,
+                        conflict: conflict
+                    })
+                });
+            }
+            t.status = 'completed';
+            log(`✓ ${t.destPath} (${formatBytes(t.size)})`, 'success');
+        } catch (e) {
+            t.status = 'error';
+            t.error = e.message;
+            log(`✗ ${t.destPath}: ${e.message}`, 'error');
+        }
+        renderTransfers();
+    }
+    
+    showToast('Transfer complete', 'success');
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function escapeJs(text) {
+    return text.replace(/'/g, "\\'").replace(/"/g, '\\"');
+}
+
+function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+// ===== INIT =====
+async function init() {
+    await loadQueue();
+    await loadLocalFiles();
+    await refreshDevices();
+    renderTransfers();
+    
+    // Poll queue
+    setInterval(loadQueue, 5000);
+}
+
+init();
+</script>
+</body>
+</html>

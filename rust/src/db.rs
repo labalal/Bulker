@@ -78,7 +78,7 @@ impl Db {
         for (pos, id) in order.iter().enumerate() {
             if let Some(item) = items.get(id) {
                 tx.execute(
-                    "INSERT INTO items (id, pos, url, title, from_playlist, status) VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO items (id, pos, url, title, from_playlist, status) VALUES (?, ?, ?, ?, ?, ?)",
                     rusqlite::params![item.id, pos as i64, item.url, item.title, item.from_playlist as i64, item.status],
                 )?;
             }
@@ -249,6 +249,35 @@ impl Db {
              WHERE status = 'pending'
              ORDER BY priority DESC, created_at ASC
              LIMIT 1",
+            &[],
+            |row| {
+                Ok(crate::queue_organizer::QueueItem {
+                    id: row.get(0)?,
+                    url: row.get(1)?,
+                    title: row.get(2)?,
+                    artist: row.get(3)?,
+                    priority: row.get(4)?,
+                    status: row.get(5)?,
+                    estimated_size: row.get(6)?,
+                    actual_size: row.get(7)?,
+                    retry_count: row.get(8)?,
+                    created_at: row.get(9)?,
+                    started_at: row.get(10)?,
+                    completed_at: row.get(11)?,
+                    quality_score: None,
+                    metadata: crate::queue_organizer::ItemMetadata::default(),
+                })
+            },
+        )
+    }
+    
+    /// Load all queue items from download_queue table (for startup restoration)
+    pub fn load_all_queue_items(&self) -> Result<Vec<crate::queue_organizer::QueueItem>> {
+        self.conn()?.query(
+            "SELECT id, url, title, artist, priority, status, estimated_size, actual_size, retry_count, created_at, started_at, completed_at
+             FROM download_queue
+             WHERE status IN ('pending', 'scheduled', 'Starting...')
+             ORDER BY priority DESC, created_at ASC",
             &[],
             |row| {
                 Ok(crate::queue_organizer::QueueItem {

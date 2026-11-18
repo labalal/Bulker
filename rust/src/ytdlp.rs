@@ -361,6 +361,7 @@ pub struct DownloadMeta {
     pub title: String,
     pub artist: String,
     pub duration: Option<f64>,
+    #[allow(dead_code)]
     pub premium_opus_available: bool,
     pub best_opus_kbps: f64,
     pub selected_format_id: Option<String>,
@@ -598,10 +599,6 @@ pub async fn download_once(
         cfg.socket_timeout.to_string(),
         "--download-archive".to_string(),
         cfg.archive_file.clone(),
-        "--external-downloader".to_string(),
-        "aria2c".to_string(),
-        "--external-downloader-args".to_string(),
-        format!("aria2c:{}", aria2_args(params)),
         "--output".to_string(),
         format!("{}/%(title)s [%(id)s].%(ext)s", cfg.temp_workspace_dir),
         "--extractor-args".to_string(),
@@ -684,12 +681,47 @@ pub async fn download_once(
     if video_id.is_empty() {
         return Err("Could not determine video id from URL".to_string());
     }
-    let (opus_path, thumb_path) = crate::ytdlp::locate_outputs(&video_id).ok_or_else(|| {
-        format!(
-            "No .opus output found in {} for id {video_id}",
-            cfg.temp_workspace_dir
-        )
-    })?;
+    let (opus_path, thumb_path) = match crate::ytdlp::locate_outputs(&video_id) {
+        Some(p) => p,
+        None => {
+            // No .opus in temp_workspace - check if already in archive (already downloaded)
+            let cfg = config::config();
+            let archive_dir = std::path::Path::new(&cfg.songs_archive_dir);
+            let needle = format!("[{video_id}].");
+            let mut found = None;
+            if let Ok(rd) = std::fs::read_dir(archive_dir) {
+                for entry in rd.flatten() {
+                    if entry.file_name().to_string_lossy().contains(&needle) {
+                        if entry.path().extension().map_or(false, |e| e == "opus") {
+                            found = Some(entry.path());
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(opus_path) = found {
+                info!("File already in archive (already downloaded): {}", opus_path.display());
+                // Find thumbnail if exists
+                let thumb_needle = format!("[{video_id}].");
+                let mut thumb_path = None;
+                if let Ok(rd) = std::fs::read_dir(&cfg.temp_workspace_dir) {
+                    for entry in rd.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if name.contains(&thumb_needle) && name.ends_with(".jpg") {
+                            thumb_path = Some(entry.path());
+                            break;
+                        }
+                    }
+                }
+                (opus_path, thumb_path)
+            } else {
+                return Err(format!(
+                    "No .opus output found in {} for id {video_id} (not in archive either)",
+                    cfg.temp_workspace_dir
+                ));
+            }
+        }
+    };
 
     // Quality receipt: delivered bitrate from size + duration, so Premium
     // (itag 774, ~256kbps) vs the free tier (itag 251, 128-160kbps) is

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::path::PathBuf;
 use crate::security::{validate_device_id, sanitize_filename};
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -12,6 +12,20 @@ pub struct ScannedSong {
     pub bitrate: Option<i32>,
     pub file_path: String,
     pub file_size: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StorageInfo {
+    pub total: u64,
+    pub free: u64,
+    pub available: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AdbDirEntry {
+    pub name: String,
+    pub path: String,
+    pub mtime: Option<String>,
 }
 
 pub struct AdbScanner {
@@ -86,11 +100,10 @@ impl AdbScanner {
         Ok(all_songs)
     }
 
-    fn scan_directory(&self, dir: &str) -> Result<Vec<ScannedSong>> {
+    pub fn scan_directory(&self, dir: &str) -> Result<Vec<ScannedSong>> {
         let extensions = ["opus", "mp3", "flac", "m4a", "ogg", "wav"];
         let mut all_files = Vec::new();
         
-        // Execute 'ls' directly without shell expansion to prevent command injection
         let mut cmd = self.adb_cmd(&["shell", "ls", dir])?;
         if let Ok(output) = cmd.output() {
             if output.status.success() {
@@ -160,7 +173,6 @@ impl AdbScanner {
             artist = "Unknown Artist".to_string();
         }
 
-        // Sanitize extracted metadata
         let title = sanitize_filename(&title);
         let artist = sanitize_filename(&artist);
         let file_size = self.get_file_size(file_path).unwrap_or(0);
@@ -196,7 +208,120 @@ impl AdbScanner {
             .cloned()
             .collect()
     }
+
+    /// Get device model name
+    pub fn get_device_model(&self) -> Result<String> {
+        let mut cmd = self.adb_cmd(&["shell", "getprop", "ro.product.model"])?;
+        let output = cmd.output().context("Failed to get device model")?;
+        if output.status.success() {
+            let model = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !model.is_empty() {
+                return Ok(model);
+            }
+        }
+        Ok("Unknown".to_string())
+    }
+
+    /// Get storage info
+    pub fn get_storage_info(&self) -> Result<StorageInfo> {
+        let mut cmd = self.adb_cmd(&["shell", "df", "/sdcard"])?;
+        let output = cmd.output().context("Failed to get storage info")?;
+        
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines().skip(1) {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 4 {
+                    let total = parts[1].parse::<u64>().unwrap_or(0) * 1024;
+                    let _used = parts[2].parse::<u64>().unwrap_or(0) * 1024;
+                    let free = parts[3].parse::<u64>().unwrap_or(0) * 1024;
+                    return Ok(StorageInfo { total, free, available: free });
+                }
+            }
+        }
+        
+        Ok(StorageInfo { total: 0, free: 0, available: 0 })
+    }
+
+    /// List directory entries (folders)
+    pub fn list_directory(&self, dir: &str) -> Result<Vec<AdbDirEntry>> {
+        let mut cmd = self.adb_cmd(&["shell", "ls", "-la", dir])?;
+        let output = cmd.output().context("Failed to list directory")?;
+        
+        let mut entries = Vec::new();
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines().skip(1) {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 9 && parts[0].starts_with('d') {
+                    let name = parts[8..].join(" ");
+                    if name != "." && name != ".." {
+                        let mtime = Some(format!("{} {} {}", parts[5], parts[6], parts[7]));
+                        entries.push(AdbDirEntry {
+                            name: name.clone(),
+                            path: format!("{}/{}", dir.trim_end_matches('/'), name),
+                            mtime,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Push file to device
+    pub fn push_file(&self, local: &PathBuf, remote: &Path, conflict: &str) -> Result<()> {
+        let remote_str = remote.to_string_lossy().to_string();
+        let remote_dir = remote.parent().unwrap_or(Path::new("/")).to_string_lossy().to_string();
+        
+        let mut cmd = self.adb_cmd(&["shell", "mkdir", "-p", &remote_dir])?;
+        let _ = cmd.output();
+        
+        let remote_file = remote_str.clone();
+        if conflict == "skip" {
+            let mut check = self.adb_cmd(&["shell", "test", "-f", &remote_file])?;
+            if check.output().map(|o| o.status.success()).unwrap_or(false) {
+                return Err(anyhow::anyhow!("File already exists (skip mode)"));
+            }
+        } else if conflict == "overwrite" {
+            let mut rm = self.adb_cmd(&["shell", "rm", "-f", &remote_file])?;
+            let _ = rm.output();
+        }
+        
+        let mut cmd = self.adb_cmd(&["push", local.to_str().unwrap(), &remote_str])?;
+        let output = cmd.output().context("Failed to push file")?;
+        
+        if output.status.success() {
+            Ok(())
+        } else {
+            let err = String::from_utf8_lossy(&output.stderr);
+            Err(anyhow::anyhow!("adb push failed: {}", err))
+        }
+    }
+
+    /// Pull file from device
+    pub fn pull_file(&self, remote: &Path, local: &PathBuf, conflict: &str) -> Result<()> {
+        let remote_str = remote.to_string_lossy().to_string();
+        let local_str = local.to_string_lossy().to_string();
+        
+        if conflict == "skip" && local.exists() {
+            return Err(anyhow::anyhow!("Local file already exists (skip mode)"));
+        } else if conflict == "overwrite" && local.exists() {
+            let _ = std::fs::remove_file(local);
+        }
+        
+        let mut cmd = self.adb_cmd(&["pull", &remote_str, &local_str])?;
+        let output = cmd.output().context("Failed to pull file")?;
+        
+        if output.status.success() {
+            Ok(())
+        } else {
+            let err = String::from_utf8_lossy(&output.stderr);
+            Err(anyhow::anyhow!("adb pull failed: {}", err))
+        }
+    }
 }
+
 
 pub fn build_search_query(song: &ScannedSong) -> String {
     let mut query = String::new();

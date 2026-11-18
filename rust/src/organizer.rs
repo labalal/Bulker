@@ -264,11 +264,13 @@ impl MusicOrganizer {
             .to_string()
     }
 
+    #[allow(dead_code)]
     pub fn register_known_artist(&self, artist: &str) {
         let cleaned = self.clean_artist_name(artist);
         KNOWN_ARTISTS.lock().unwrap().push(cleaned);
     }
 
+    #[allow(dead_code)]
     pub fn add_alias(&self, raw: &str, canonical: &str) {
         ARTIST_ALIASES.lock().unwrap().insert(raw.to_lowercase(), canonical.to_string());
     }
